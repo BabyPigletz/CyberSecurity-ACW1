@@ -20,6 +20,19 @@ Demo keypairs live under `keys/` (`demo_a`: full pair; `demo_b`: public key
 only, used to produce the wrong-key negative case). Do not treat either as a
 real secret — see `docs/format.md` §6.
 
+To run the test suite (95 tests, all against synthetic data or the fixtures
+in `samples/` — no real image/audio hardware needed except for actually
+*hearing* playback, which the tests don't attempt):
+
+```
+pip install -r requirements-dev.txt
+pytest
+```
+
+`samples/generate_samples.py` rebuilds the fixtures under `samples/` (a cover
+PNG/WAV and one sample per verdict) if you ever need to regenerate them;
+`samples/README.md` documents the passphrase and expected verdict for each.
+
 ## What it does
 
 Given a cover PNG or WAV and a passphrase, the tool derives a start location
@@ -140,6 +153,36 @@ extended to multiple signers later.
 | `CANNOT_VERIFY` | File unreadable, unsupported format, or an internal field (version, declared length) doesn't make sense — verification can't even be attempted. |
 
 Full precedence rules: `docs/format.md` §9.
+
+**A nuance found during implementation:** because the RSA-PSS signature
+covers the entire `salt || iv || ciphertext` range, any tamper severe enough
+to break the AES-GCM tag also breaks the signature — so `TAMPERED` is only
+ever reached in practice via a cover-hash mismatch (editing the visible,
+unsigned carrier bytes), not via a broken GCM tag with an otherwise-valid
+signature. That combination is correctly implemented and unit-tested in
+isolation (`tests/test_verdict.py`), but has no realistic external trigger
+given this signing scope — not a bug, just worth knowing before relying on
+it as a second, independently-reachable demo path.
+
+## Steganalysis (innovation component)
+
+`core/steganalysis.py` implements Westfeld & Pfitzmann's chi-square
+Pairs-of-Values attack — a sliding-window statistical test that flags
+regions whose byte-value pairs look artificially randomized, which is what
+LSB-replacement produces. Verified against a constructed buffer (a
+structured region directly adjacent to genuine random bytes) where the
+windowed p-value transitions sharply and exactly at the boundary — see
+`tests/test_steganalysis.py`.
+
+**Caveat found while testing this:** `docs/format.md` §11's demo claim
+("flags your own 8-LSB output while missing your 1-LSB output") could not be
+reliably reproduced against the synthetic cover images generated in this
+environment — a clean, regular pattern never triggers the attack regardless
+of embedding, and a jittered/noisy synthetic pattern already looks close to
+random in its low bits regardless of embedding. Real camera sensor noise
+sits between those two extremes, which neither synthetic approach
+reproduces. **Test this against a real photograph before the actual demo** —
+don't assume the synthetic samples in this repo will show the effect.
 
 ## Known limitations
 
