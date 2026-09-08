@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / temp
+*.log
+
+# Keys - never commit real private keys, even test ones, once this repo is public
+*.pem
+private_key*
