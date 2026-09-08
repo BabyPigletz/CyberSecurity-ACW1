@@ -19,3 +19,9 @@ Thumbs.db
 # Keys - never commit real private keys, even test ones, once this repo is public
 *.pem
 private_key*
+
+# Exception: committed demo keys (see docs/format.md §6/§12) - demo-only,
+# clearly labelled, needed for the marker to reproduce the wrong-key demo case.
+!keys/demo_a_priv.pem
+!keys/demo_a_pub.pem
+!keys/demo_b_pub.pem

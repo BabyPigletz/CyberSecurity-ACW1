@@ -1,0 +1,140 @@
+"""End-to-end GUI tests: real Tkinter widgets, real bound button callbacks.
+
+Only the modal file-dialog and messagebox functions are monkeypatched, since
+those block on user input and can't be scripted otherwise - this is the
+standard way to drive a Tkinter app headlessly. Every call below goes through
+the exact method a real button's `command=` is wired to, so a pass here means
+the GUI itself produces the verdict, not just the underlying core/ codec.
+
+Requires a reachable display (tk.Tk() must be able to connect) - skipped
+automatically if none is available (e.g. a CI runner with no X server/Xvfb).
+"""
+
+import tempfile
+from pathlib import Path
+from unittest import mock
+
+import pytest
+from PIL import Image
+
+SAMPLES = Path(__file__).resolve().parent.parent / "samples"
+PASSPHRASE = "INF2005-P1-6-demo"
+
+
+def _display_available():
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.destroy()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(not _display_available(), reason="no reachable display for Tkinter")
+
+
+@pytest.fixture
+def app():
+    import gui as gui_mod
+
+    application = gui_mod.ACW1()
+    application.update()
+    yield application
+    application.destroy()
+
+
+def _verify(app, path, passphrase=None):
+    import gui as gui_mod
+
+    if passphrase is not None:
+        app.passphrase_var.set(passphrase)
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value=str(path)):
+        app.verify_file()
+    return app.verdict_var.get()
+
+
+def test_positive_image_authentic(app):
+    assert _verify(app, SAMPLES / "stego_image_authentic.png", PASSPHRASE) == "AUTHENTIC"
+
+
+def test_positive_audio_authentic(app):
+    assert _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE) == "AUTHENTIC"
+
+
+def test_tampered_image_is_tampered(app):
+    assert _verify(app, SAMPLES / "stego_image_tampered.png", PASSPHRASE) == "TAMPERED"
+
+
+def test_wrong_passphrase_audio_is_payload_missing(app):
+    assert _verify(app, SAMPLES / "stego_audio_authentic.wav", "not-the-right-passphrase") == "PAYLOAD_MISSING"
+
+
+def test_wrong_key_image_is_signature_invalid(app):
+    assert _verify(app, SAMPLES / "stego_image_wrong_key.png", PASSPHRASE) == "SIGNATURE_INVALID"
+
+
+def test_doctored_fixture_is_wrong_start_location(app):
+    assert _verify(app, SAMPLES / "stego_image_wrong_start_location.png", PASSPHRASE) == "WRONG_START_LOCATION"
+
+
+def test_plain_cover_is_payload_missing(app):
+    assert _verify(app, SAMPLES / "cover.png", PASSPHRASE) == "PAYLOAD_MISSING"
+
+
+def test_unreadable_file_is_cannot_verify(app, tmp_path):
+    garbage = tmp_path / "not_really_a.png"
+    garbage.write_bytes(b"not a real image file")
+    assert _verify(app, garbage, PASSPHRASE) == "CANNOT_VERIFY"
+
+
+def test_embed_button_then_verify_button_round_trip(app, tmp_path):
+    import gui as gui_mod
+
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value=str(SAMPLES / "cover.png")):
+        app.load_cover()
+    app.lsb_var.set(3)
+    app.passphrase_var.set("a-fresh-session-passphrase")
+
+    out_path = tmp_path / "fresh_stego.png"
+    with mock.patch.object(gui_mod.filedialog, "asksaveasfilename", return_value=str(out_path)):
+        app.embed_payload()
+
+    assert out_path.exists()
+    assert app.start_location_var.get().isdigit()
+    assert int(app.start_location_var.get()) > 0
+
+    assert _verify(app, out_path) == "AUTHENTIC"
+
+
+def test_oversized_payload_rejected_via_embed_button(app, tmp_path):
+    import gui as gui_mod
+
+    tiny_cover = tmp_path / "tiny.png"
+    Image.new("RGB", (4, 4)).save(tiny_cover, format="PNG")
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value=str(tiny_cover)):
+        app.load_cover()
+    app.passphrase_var.set("whatever")
+
+    out_path = tmp_path / "should_not_exist.png"
+    with mock.patch.object(gui_mod.messagebox, "showerror") as mock_error:
+        with mock.patch.object(gui_mod.filedialog, "asksaveasfilename", return_value=str(out_path)):
+            app.embed_payload()
+        assert mock_error.called
+
+    assert not out_path.exists()
+
+
+def test_play_button_degrades_gracefully_without_a_system_player(app):
+    """Confirms the playback code path doesn't crash when no audio player
+    binary is present (true in this dev sandbox - see the final report's
+    caveat about actual sound output never being confirmed here).
+    """
+    import gui as gui_mod
+
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.shutil, "which", return_value=None):
+        with mock.patch.object(gui_mod.messagebox, "showinfo") as mock_info:
+            app.stego_play_button.invoke()
+            assert mock_info.called
