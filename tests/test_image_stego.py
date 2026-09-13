@@ -44,9 +44,10 @@ def test_encode_decode_round_trip_authentic(cover_png, tmp_path):
     start = image_stego.encode(cover_png, stego_path, {"meta": {"team": "P1-6"}}, "hunter2", demo_a, num_lsb=2)
     assert start > 0
 
-    verdict, parsed = image_stego.decode(stego_path, "hunter2", trusted)
+    verdict, extracted = image_stego.decode(stego_path, "hunter2", trusted)
     assert verdict == Verdict.AUTHENTIC
-    assert parsed["meta"]["team"] == "P1-6"
+    assert extracted.cover_hash_matches
+    assert extracted.payload["meta"]["team"] == "P1-6"
 
 
 def test_jpeg_cover_rejected_on_embed_and_verify(tmp_path):
@@ -107,6 +108,6 @@ def test_tampered_pixel_after_embed_is_tampered(cover_png, tmp_path):
     px[0, 0] = (r ^ 0b10000000, g, b)
     img.save(stego_path, format="PNG")
 
-    verdict, parsed = image_stego.decode(stego_path, "hunter2", trusted)
+    verdict, extracted = image_stego.decode(stego_path, "hunter2", trusted)
     assert verdict == Verdict.TAMPERED
-    assert parsed is None
+    assert extracted is not None and not extracted.cover_hash_matches

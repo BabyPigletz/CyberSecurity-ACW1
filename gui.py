@@ -300,9 +300,9 @@ class ACW1(tk.Tk):
 
         try:
             if kind == "image":
-                verdict, parsed = image_stego.decode(path, passphrase, self._trusted_keys)
+                verdict, extracted = image_stego.decode(path, passphrase, self._trusted_keys)
             else:
-                verdict, parsed = audio_stego.decode(path, passphrase, self._trusted_keys)
+                verdict, extracted = audio_stego.decode(path, passphrase, self._trusted_keys)
         except Exception as exc:
             messagebox.showerror("Verify failed", str(exc))
             return
@@ -319,8 +319,24 @@ class ACW1(tk.Tk):
 
         self.verdict_var.set(verdict.name)
         self.verdict_label.config(fg=VERDICT_COLORS.get(verdict, "black"))
-        self._set_payload_text(json.dumps(parsed, indent=2, sort_keys=True) if parsed else "(no verified payload)")
+        self._set_payload_text(self._describe_extraction(verdict, extracted))
         self.status_var.set(f"Verified {path.name}: {verdict.name}")
+
+    def _describe_extraction(self, verdict: Verdict, extracted) -> str:
+        if extracted is not None:
+            match = "yes" if extracted.cover_hash_matches else "NO - the carrier was altered after signing"
+            return (
+                f"Cover hash embedded at signing:\n{extracted.embedded_cover_hash or '(missing)'}\n\n"
+                f"Cover hash recomputed now:\n{extracted.recomputed_cover_hash}\n\n"
+                f"Match: {match}\n\n"
+                f"Extracted payload:\n{json.dumps(extracted.payload, indent=2, sort_keys=True)}"
+            )
+        if verdict == Verdict.SIGNATURE_INVALID:
+            return (
+                "Nothing extracted is shown: the signature did not verify against the trusted key, "
+                "so the payload and its cover hash cannot be trusted."
+            )
+        return "(no verified payload)"
 
     def _set_payload_text(self, text: str):
         self.payload_text.config(state=tk.NORMAL)

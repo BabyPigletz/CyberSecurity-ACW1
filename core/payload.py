@@ -53,6 +53,17 @@ class BodyResult:
     parsed: Optional[dict]
 
 
+@dataclass
+class Extracted:
+    payload: dict
+    embedded_cover_hash: Optional[str]
+    recomputed_cover_hash: str
+
+    @property
+    def cover_hash_matches(self) -> bool:
+        return self.embedded_cover_hash == self.recomputed_cover_hash
+
+
 def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -173,7 +184,7 @@ def embed(carrier: bytearray, cover_id: str, payload_fields: dict, passphrase: s
     return start
 
 
-def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tuple[Verdict, Optional[dict]]":
+def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tuple[Verdict, Optional[Extracted]]":
     """Full verify flow: derive start, read prefix/body, gather Evidence, decide."""
     carrier_len = len(carrier)
     if carrier_len < 2:
@@ -209,6 +220,7 @@ def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tupl
     ev.claimed_signer_key_id = body_result.claimed_signer_key_id
     ev.gcm_tag_ok = body_result.gcm_ok
 
+    recomputed = None
     if body_result.gcm_ok and body_result.parsed is not None:
         recomputed = crypto.canonical_hash(bytes(carrier), prefix_derived.num_lsb).hex()
         ev.cover_hash_matches = body_result.cover_hash_hex == recomputed
@@ -216,4 +228,7 @@ def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tupl
         ev.cover_hash_matches = True  # irrelevant - TAMPERED already decided by gcm_tag_ok
 
     verdict = decide(ev)
-    return verdict, (body_result.parsed if verdict == Verdict.AUTHENTIC else None)
+    # The signature is what vouches for this data, so it is never released without a valid one.
+    if recomputed is None or verdict not in (Verdict.AUTHENTIC, Verdict.TAMPERED):
+        return verdict, None
+    return verdict, Extracted(body_result.parsed, body_result.cover_hash_hex, recomputed)

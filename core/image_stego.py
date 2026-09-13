@@ -60,7 +60,7 @@ def encode(in_path: Path, out_path: Path, payload_fields: dict, passphrase: str,
 
 def decode(path: Path, passphrase: str, trusted_keys: dict):
     """Extract and verify. Never raises for expected failure modes - always
-    returns (Verdict, payload_dict_or_None).
+    returns (Verdict, payload.Extracted or None).
     """
     try:
         carrier, meta = _load_carrier(path)

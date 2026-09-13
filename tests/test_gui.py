@@ -108,6 +108,39 @@ def test_embed_button_then_verify_button_round_trip(app, tmp_path):
     assert _verify(app, out_path) == "AUTHENTIC"
 
 
+def _panel_hashes(app):
+    lines = app.payload_text.get("1.0", "end").splitlines()
+    embedded = lines[lines.index("Cover hash embedded at signing:") + 1]
+    recomputed = lines[lines.index("Cover hash recomputed now:") + 1]
+    return embedded, recomputed
+
+
+def test_authentic_shows_payload_and_matching_hashes(app):
+    assert _verify(app, SAMPLES / "stego_image_authentic.png", PASSPHRASE) == "AUTHENTIC"
+    text = app.payload_text.get("1.0", "end")
+    embedded, recomputed = _panel_hashes(app)
+    assert len(embedded) == 64 and embedded == recomputed
+    assert "Match: yes" in text
+    assert '"team": "P1-6"' in text
+
+
+def test_tampered_shows_payload_and_failed_hash_comparison(app):
+    assert _verify(app, SAMPLES / "stego_image_tampered.png", PASSPHRASE) == "TAMPERED"
+    text = app.payload_text.get("1.0", "end")
+    embedded, recomputed = _panel_hashes(app)
+    assert len(embedded) == 64 and len(recomputed) == 64 and embedded != recomputed
+    assert "Match: NO" in text
+    assert '"team": "P1-6"' in text
+
+
+def test_signature_invalid_withholds_payload_and_explains_why(app):
+    assert _verify(app, SAMPLES / "stego_image_wrong_key.png", PASSPHRASE) == "SIGNATURE_INVALID"
+    text = app.payload_text.get("1.0", "end")
+    assert "signature did not verify" in text
+    assert "Cover hash" not in text
+    assert "P1-6" not in text
+
+
 def test_cover_picker_offers_no_jpeg(app):
     import gui as gui_mod
 
