@@ -10,7 +10,9 @@ Requires a reachable display (tk.Tk() must be able to connect) - skipped
 automatically if none is available (e.g. a CI runner with no X server/Xvfb).
 """
 
+import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -259,3 +261,79 @@ def test_play_button_degrades_gracefully_without_a_system_player(app):
         with mock.patch.object(gui_mod.messagebox, "showinfo") as mock_info:
             app.stego_play_button.invoke()
             assert mock_info.called
+
+
+def _fake_player(tmp_path, script):
+    player = tmp_path / "paplay"
+    player.write_text("#!/bin/sh\n" + script)
+    player.chmod(0o755)
+    return str(player)
+
+
+def _only(name, path):
+    return lambda requested: path if requested == name else None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX shell script as a fake player")
+def test_player_that_fails_after_starting_is_reported(app, tmp_path):
+    import gui as gui_mod
+
+    player = _fake_player(tmp_path, 'echo "Connection failure: Connection refused" >&2\nexit 1\n')
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.shutil, "which", side_effect=_only("paplay", player)):
+        with mock.patch.object(gui_mod.messagebox, "showerror") as mock_error:
+            app.stego_play_button.invoke()
+            deadline = time.time() + 5
+            while not mock_error.called and time.time() < deadline:
+                app.update()
+                time.sleep(0.05)
+
+    assert mock_error.called
+    assert "Connection refused" in mock_error.call_args[0][1]
+    assert app.status_var.get() == "Playback failed: stego_audio_authentic.wav"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX shell script as a fake player")
+def test_playing_a_second_clip_stops_the_first(app, tmp_path):
+    import gui as gui_mod
+
+    player = _fake_player(tmp_path, "sleep 30\n")
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.shutil, "which", side_effect=_only("paplay", player)):
+        app.stego_play_button.invoke()
+        first = app._player_process
+        app.stego_play_button.invoke()
+        second = app._player_process
+
+    assert first.wait(timeout=5) < 0
+    assert second is not first and second.poll() is None
+    second.terminate()
+    second.wait(timeout=5)
+
+
+def test_windows_plays_through_winsound(app):
+    import gui as gui_mod
+
+    fake_winsound = mock.MagicMock(SND_FILENAME=0x20000, SND_ASYNC=0x1, SND_NODEFAULT=0x2)
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.sys, "platform", "win32"), mock.patch.dict(sys.modules, {"winsound": fake_winsound}):
+        app.stego_play_button.invoke()
+
+    played_path, flags = fake_winsound.PlaySound.call_args[0]
+    assert played_path.endswith("stego_audio_authentic.wav")
+    assert flags == 0x20000 | 0x1 | 0x2
+
+
+def test_macos_plays_through_afplay(app):
+    import gui as gui_mod
+
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.sys, "platform", "darwin"), \
+            mock.patch.object(gui_mod.shutil, "which", side_effect=_only("afplay", "/usr/bin/afplay")), \
+            mock.patch.object(gui_mod.subprocess, "Popen") as mock_popen:
+        mock_popen.return_value.poll.return_value = 0
+        mock_popen.return_value.returncode = 0
+        app.stego_play_button.invoke()
+
+    command = mock_popen.call_args[0][0]
+    assert command[0] == "/usr/bin/afplay" and command[1].endswith("stego_audio_authentic.wav")

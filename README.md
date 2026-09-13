@@ -20,6 +20,12 @@ Demo keypairs live under `keys/` (`demo_a`: full pair; `demo_b`: public key
 only, used to produce the wrong-key negative case). Do not treat either as a
 real secret — see `docs/format.md` §6.
 
+Audio playback uses the operating system's own player, so no extra Python
+package is needed: `winsound` on Windows and `afplay` on macOS are built in;
+on Linux the app uses `paplay`, `pw-play` or `aplay`, whichever is installed.
+On Ubuntu or WSL, install one with `sudo apt install pulseaudio-utils` (WSLg
+already provides the PulseAudio server it talks to).
+
 To run the test suite (95 tests, all against synthetic data or the fixtures
 in `samples/` — no real image/audio hardware needed except for actually
 *hearing* playback, which the tests don't attempt):

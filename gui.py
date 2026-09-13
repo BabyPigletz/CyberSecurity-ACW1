@@ -15,6 +15,7 @@ see README.md "Why encrypt-then-sign"). There is deliberately no key picker.
 import json
 import shutil
 import subprocess
+import sys
 import tkinter as tk
 import wave
 from pathlib import Path
@@ -55,6 +56,7 @@ class ACW1(tk.Tk):
         self.cover_carrier_len: "int | None" = None
         self.stego_path: "Path | None" = None
         self.active_kind: "str | None" = None  # "image" | "audio" - of whichever panel was last populated
+        self._player_process: "subprocess.Popen | None" = None
 
         self._signer_keypair = crypto.load_keypair(KEYS_DIR / "demo_a_pub.pem", KEYS_DIR / "demo_a_priv.pem")
         self._trusted_keys = {self._signer_keypair.key_id: self._signer_keypair.public_key}
@@ -436,13 +438,50 @@ class ACW1(tk.Tk):
 
     ## Audio playback
     def _play_audio(self, path: Path):
-        player = shutil.which("paplay") or shutil.which("aplay")
+        if self._player_process is not None and self._player_process.poll() is None:
+            self._player_process.terminate()  # don't layer the cover and stego clips on top of each other
+
+        if sys.platform == "win32":
+            import winsound
+
+            try:
+                # SND_ASYNC also replaces any clip that is still playing.
+                winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+            except RuntimeError as exc:
+                messagebox.showerror("Playback failed", str(exc))
+                return
+            self.status_var.set(f"Playing {path.name}")
+            return
+
+        candidates = ("afplay",) if sys.platform == "darwin" else ("paplay", "pw-play", "aplay")
+        player = next(filter(None, map(shutil.which, candidates)), None)
         if not player:
             messagebox.showinfo(
-                "Playback unavailable", "No system audio player (paplay/aplay) found in this environment."
+                "Playback unavailable",
+                f"No audio player found (looked for {', '.join(candidates)}). "
+                "On Ubuntu or WSL, install one with: sudo apt install pulseaudio-utils",
             )
             return
         try:
-            subprocess.Popen([player, str(path)])
-        except Exception as exc:
+            self._player_process = subprocess.Popen(
+                [player, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            )
+        except OSError as exc:
             messagebox.showerror("Playback failed", str(exc))
+            return
+        self.status_var.set(f"Playing {path.name}")
+        self.after(200, self._check_player, self._player_process, Path(player).name, path.name)
+
+    def _check_player(self, process: subprocess.Popen, player_name: str, clip_name: str):
+        if process.poll() is None:
+            self.after(200, self._check_player, process, player_name, clip_name)
+            return
+        if process is not self._player_process:
+            return  # replaced by a newer clip, which reports its own outcome
+        self._player_process = None
+        if process.returncode == 0:
+            self.status_var.set(f"Finished playing {clip_name}")
+            return
+        self.status_var.set(f"Playback failed: {clip_name}")
+        detail = process.stderr.read().decode(errors="replace").strip() or "(no error output)"
+        messagebox.showerror("Playback failed", f"{player_name} exited with code {process.returncode}:\n{detail}")
