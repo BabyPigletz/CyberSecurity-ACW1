@@ -22,7 +22,7 @@ from tkinter import filedialog, messagebox
 
 from PIL import Image, ImageTk
 
-from core import audio_stego, crypto, image_stego
+from core import attack_simulation, audio_stego, crypto, image_stego, steganalysis
 from core.errors import CapacityError
 from core.verdict import Verdict
 
@@ -139,6 +139,8 @@ class ACW1(tk.Tk):
         )
         self.embed_button.pack(fill=tk.X, pady=2)
         tk.Button(right_frame, text="Verify File...", command=self.verify_file).pack(fill=tk.X, pady=2)
+        tk.Button(right_frame, text="Run Attack Simulation", command=self.run_attack_simulation).pack(fill=tk.X, pady=2)
+        tk.Button(right_frame, text="Compare Steganalysis", command=self.compare_steganalysis).pack(fill=tk.X, pady=2)
 
         tk.Label(right_frame, text="Verdict", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(16, 2))
         self.verdict_var = tk.StringVar(value="—")
@@ -325,6 +327,65 @@ class ACW1(tk.Tk):
         self.payload_text.delete("1.0", tk.END)
         self.payload_text.insert(tk.END, text)
         self.payload_text.config(state=tk.DISABLED)
+
+    ## Innovation demonstrations
+    def run_attack_simulation(self):
+        if self.stego_path is None or self.active_kind is None:
+            messagebox.showwarning("No stego object", "Embed or verify a stego image/audio file first.")
+            return
+        passphrase = self.passphrase_var.get()
+        if not passphrase:
+            messagebox.showwarning("Missing passphrase", "Enter the passphrase used for verification.")
+            return
+        output_dir = filedialog.askdirectory(title="Choose Attack Output Folder")
+        if not output_dir:
+            return
+        try:
+            cases = attack_simulation.run_attack_suite(
+                self.stego_path,
+                self.active_kind,
+                passphrase,
+                self._trusted_keys,
+                Path(output_dir),
+            )
+        except Exception as exc:
+            messagebox.showerror("Attack simulation failed", str(exc))
+            return
+
+        lines = [
+            f"{case.name}: {case.actual.name} ({'PASS' if case.passed else 'UNEXPECTED'})"
+            for case in cases
+        ]
+        self._set_payload_text("Attack simulation\n\n" + "\n".join(lines))
+        self.status_var.set(f"Attack simulation completed: {sum(case.passed for case in cases)}/{len(cases)} passed")
+
+    def compare_steganalysis(self):
+        if self.cover_path is None or self.stego_path is None or self.active_kind is None:
+            messagebox.showwarning("Need cover and stego", "Load a cover and create or verify its stego counterpart first.")
+            return
+        try:
+            if self.active_kind == "image":
+                cover, _ = image_stego._load_carrier(self.cover_path)
+                stego, _ = image_stego._load_carrier(self.stego_path)
+            else:
+                cover, _ = audio_stego._load_carrier(self.cover_path)
+                stego, _ = audio_stego._load_carrier(self.stego_path)
+            result = steganalysis.compare(bytes(cover), bytes(stego), window=2048, step=1024)
+        except Exception as exc:
+            messagebox.showerror("Steganalysis failed", str(exc))
+            return
+
+        report = (
+            "Paired steganalysis\n\n"
+            f"Windows analysed: {len(result.windows)}\n"
+            f"Cover maximum p-value: {result.cover_max_pvalue:.4f}\n"
+            f"Stego maximum p-value: {result.stego_max_pvalue:.4f}\n"
+            f"Suspicious windows: {len(result.suspicious_offsets)}\n"
+            f"Assessment: {'LIKELY HIDDEN DATA' if result.likely_hidden_data else 'NO STRONG DIFFERENCE'}\n\n"
+            "This is statistical evidence, not proof of tampering."
+        )
+        self._set_payload_text(report)
+        self.status_var.set("Paired steganalysis completed")
 
     ## Audio playback
     def _play_audio(self, path: Path):

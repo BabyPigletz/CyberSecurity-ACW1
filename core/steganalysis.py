@@ -8,7 +8,22 @@ and the point of this module is to demonstrate the detector's-eye view.
 """
 
 import math
+from dataclasses import dataclass
 from typing import List, Tuple
+
+
+@dataclass(frozen=True)
+class PairedAnalysis:
+    """Comparison of matching cover and stego scan windows."""
+
+    windows: List[Tuple[int, float, float, float]]
+    suspicious_offsets: List[int]
+    cover_max_pvalue: float
+    stego_max_pvalue: float
+
+    @property
+    def likely_hidden_data(self) -> bool:
+        return bool(self.suspicious_offsets)
 
 
 def _regularized_lower_incomplete_gamma(a: float, x: float) -> float:
@@ -100,3 +115,45 @@ def flagged(carrier: bytes, window: int = 512, step: int = 256, threshold: float
     of scan() for a quick demo assertion or a GUI indicator.
     """
     return any(p >= threshold for _, p in scan(carrier, window, step))
+
+
+def paired_scan(cover: bytes, stego: bytes, window: int = 512, step: int = 256):
+    """Return matching windows as ``(offset, cover_p, stego_p, delta)``.
+
+    Comparing a stego object with its original cover reduces false positives
+    caused by naturally unusual image or audio regions.
+    """
+    length = min(len(cover), len(stego))
+    if length < window:
+        return []
+    cover_results = scan(cover[:length], window, step)
+    stego_results = scan(stego[:length], window, step)
+    return [
+        (offset, cover_p, stego_p, stego_p - cover_p)
+        for (offset, cover_p), (_, stego_p) in zip(cover_results, stego_results)
+    ]
+
+
+def compare(
+    cover: bytes,
+    stego: bytes,
+    window: int = 512,
+    step: int = 256,
+    stego_threshold: float = 0.9,
+    delta_threshold: float = 0.2,
+) -> PairedAnalysis:
+    """Analyse statistical changes between a cover and its stego version."""
+    windows = paired_scan(cover, stego, window, step)
+    suspicious_offsets = [
+        offset
+        for offset, _, stego_p, delta in windows
+        if stego_p >= stego_threshold and delta >= delta_threshold
+    ]
+    cover_pvalues = [cover_p for _, cover_p, _, _ in windows]
+    stego_pvalues = [stego_p for _, _, stego_p, _ in windows]
+    return PairedAnalysis(
+        windows=windows,
+        suspicious_offsets=suspicious_offsets,
+        cover_max_pvalue=max(cover_pvalues, default=0.0),
+        stego_max_pvalue=max(stego_pvalues, default=0.0),
+    )

@@ -33,6 +33,14 @@ pytest
 PNG/WAV and one sample per verdict) if you ever need to regenerate them;
 `samples/README.md` documents the passphrase and expected verdict for each.
 
+The GUI also includes two innovation demonstrations. **Run Attack Simulation**
+creates safe copies of the current stego object with visible-carrier tampering
+and hidden-payload corruption, then tests those copies with wrong-passphrase
+and untrusted-key cases. **Compare Steganalysis** compares matching windows of
+the original cover and stego object using the chi-square detector, reducing
+false positives from naturally unusual regions. Attack artifacts are written
+to a folder selected in the GUI; the original stego object is never changed.
+
 ## What it does
 
 Given a cover PNG or WAV and a passphrase, the tool derives a start location
@@ -173,6 +181,13 @@ LSB-replacement produces. Verified against a constructed buffer (a
 structured region directly adjacent to genuine random bytes) where the
 windowed p-value transitions sharply and exactly at the boundary — see
 `tests/test_steganalysis.py`.
+
+The paired analysis extension compares the original cover and stego windows,
+requiring both a high stego p-value and a meaningful increase over the cover's
+p-value before marking a region suspicious. This is statistical evidence, not
+proof of hidden data or tampering. `core/attack_simulation.py` provides the
+companion reproducible security test matrix used by the GUI and automated
+tests.
 
 **Caveat found while testing this:** `docs/format.md` §11's demo claim
 ("flags your own 8-LSB output while missing your 1-LSB output") could not be
