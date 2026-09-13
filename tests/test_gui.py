@@ -167,8 +167,16 @@ def test_message_typed_in_gui_is_recovered_exactly(app, tmp_path):
     assert "trailing spaces" not in app.payload_text.get("1.0", "end")
 
 
-def test_empty_message_shows_metadata_only_note(app):
-    assert _verify(app, SAMPLES / "stego_image_authentic.png", PASSPHRASE) == "AUTHENTIC"
+def test_empty_message_shows_metadata_only_note(app, tmp_path):
+    import gui as gui_mod
+
+    _load_cover(app, SAMPLES / "cover.png")
+    app.passphrase_var.set("metadata-only")
+    out_path = tmp_path / "metadata_only.png"
+    with mock.patch.object(gui_mod.filedialog, "asksaveasfilename", return_value=str(out_path)):
+        app.embed_payload()
+
+    assert _verify(app, out_path) == "AUTHENTIC"
     assert "no message was embedded" in app.message_output.get("1.0", "end-1c")
 
 
