@@ -191,6 +191,21 @@ def test_message_size_label_tracks_message_and_lsb(app):
     assert "Fits" in app.message_size_var.get()
 
 
+def test_details_box_sits_between_verify_and_start_location_in_control_column(app):
+    _verify(app, SAMPLES / "stego_image_authentic.png", PASSPHRASE)
+    app.update()
+
+    verify_bottom = app.verify_button.winfo_rooty() + app.verify_button.winfo_height()
+    details_top = app.payload_text.winfo_rooty()
+    details_bottom = details_top + app.payload_text.winfo_height()
+    assert verify_bottom <= details_top
+    assert details_bottom <= app.start_location_label.winfo_rooty()
+
+    control_column_left = app.embed_button.winfo_rootx()
+    assert app.payload_text.winfo_rootx() >= control_column_left
+    assert app.message_output.winfo_rootx() < control_column_left
+
+
 def test_cover_picker_offers_no_jpeg(app):
     import gui as gui_mod
 

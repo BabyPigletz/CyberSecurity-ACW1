@@ -92,7 +92,7 @@ class ACW1(tk.Tk):
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         result_frame = tk.Frame(left_frame, bd=1, relief=tk.SUNKEN)
-        result_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
+        result_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(8, 0))
         self._build_result_panel(result_frame)
 
         preview_frame = tk.Frame(left_frame)
@@ -159,14 +159,24 @@ class ACW1(tk.Tk):
             right_frame, text="Embed Payload...", command=self.embed_payload, state=tk.DISABLED
         )
         self.embed_button.pack(fill=tk.X, pady=2)
+        self.verify_button = tk.Button(right_frame, text="Verify File...", command=self.verify_file)
+        self.verify_button.pack(fill=tk.X, pady=2)
 
+        # Packed from the bottom before the details box, so the box only ever takes leftover space.
+        self.start_location_var = tk.StringVar(value="-")
+        self.start_location_label = tk.Label(right_frame, textvariable=self.start_location_var, fg="gray")
+        self.start_location_label.pack(side=tk.BOTTOM, anchor="w")
         tk.Label(right_frame, text="Start Location (derived, read-only)", font=("Segoe UI", 10, "bold")).pack(
+            side=tk.BOTTOM, anchor="w", pady=(8, 0)
+        )
+
+        tk.Label(right_frame, text="Hash Check and Other Payload Fields", font=("Segoe UI", 10, "bold")).pack(
             anchor="w", pady=(10, 0)
         )
-        self.start_location_var = tk.StringVar(value="-")
-        tk.Label(right_frame, textvariable=self.start_location_var, fg="gray").pack(anchor="w", pady=(0, 10))
-
-        tk.Button(right_frame, text="Verify File...", command=self.verify_file).pack(fill=tk.X, pady=2)
+        details_frame, self.payload_text = self._scrolled_text(
+            right_frame, height=6, width=36, wrap=tk.WORD, state=tk.DISABLED
+        )
+        details_frame.pack(fill=tk.BOTH, expand=True)
 
         self._refresh_message_size()
 
@@ -178,23 +188,11 @@ class ACW1(tk.Tk):
         self.verdict_label = tk.Label(header, textvariable=self.verdict_var, font=("Segoe UI", 13, "bold"))
         self.verdict_label.pack(side=tk.LEFT, padx=(6, 0))
 
-        body = tk.Frame(frame)
-        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 10))
-        body.columnconfigure(0, weight=3)
-        body.columnconfigure(1, weight=2)
-
-        tk.Label(body, text="Recovered Message", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-        tk.Label(body, text="Hash Check and Other Payload Fields", font=("Segoe UI", 10, "bold")).grid(
-            row=0, column=1, sticky="w", padx=(10, 0)
-        )
+        tk.Label(frame, text="Recovered Message", font=("Segoe UI", 11, "bold")).pack(anchor="w", padx=10, pady=(4, 0))
         message_frame, self.message_output = self._scrolled_text(
-            body, height=7, width=40, wrap=tk.WORD, state=tk.DISABLED, font=("Segoe UI", 11), bg="#fffdf0"
+            frame, height=7, width=40, wrap=tk.WORD, state=tk.DISABLED, font=("Segoe UI", 11), bg="#fffdf0"
         )
-        message_frame.grid(row=1, column=0, sticky="nsew")
-        details_frame, self.payload_text = self._scrolled_text(
-            body, height=7, width=30, wrap=tk.WORD, state=tk.DISABLED
-        )
-        details_frame.grid(row=1, column=1, sticky="nsew", padx=(10, 0))
+        message_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
     ## Cover loading
     def load_cover(self):
@@ -417,9 +415,9 @@ class ACW1(tk.Tk):
             match = "yes" if extracted.cover_hash_matches else "NO - the carrier was altered after signing"
             other_fields = {key: value for key, value in extracted.payload.items() if key != "message"}
             return (
+                f"Match: {match}\n\n"
                 f"Cover hash embedded at signing:\n{extracted.embedded_cover_hash or '(missing)'}\n\n"
                 f"Cover hash recomputed now:\n{extracted.recomputed_cover_hash}\n\n"
-                f"Match: {match}\n\n"
                 f"Other payload fields:\n{json.dumps(other_fields, indent=2, sort_keys=True, ensure_ascii=False)}"
             )
         if verdict == Verdict.SIGNATURE_INVALID:
