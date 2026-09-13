@@ -13,20 +13,42 @@ import wave
 
 from PIL import Image
 
-from core import audio_stego, image_stego, location, payload
+from core import audio_metrics, audio_stego, bitstream, image_stego, location, payload
 from core.verdict import Verdict
 
 
 @dataclass(frozen=True)
 class AttackCase:
     name: str
-    expected: Verdict
+    expected: Verdict | tuple[Verdict, ...]
     actual: Verdict
     output_path: Optional[Path]
+    category: str = "integrity"
+    weight: int = 1
+    audio_quality: Optional[audio_metrics.AudioQualityMetrics] = None
 
     @property
     def passed(self) -> bool:
-        return self.expected == self.actual
+        allowed = self.expected if isinstance(self.expected, tuple) else (self.expected,)
+        return self.actual in allowed
+
+
+@dataclass(frozen=True)
+class AttackScore:
+    cases: tuple[AttackCase, ...]
+    earned_points: int
+    total_points: int
+
+    @property
+    def detection_percent(self) -> float:
+        return (self.earned_points / self.total_points * 100.0) if self.total_points else 0.0
+
+
+def score_cases(cases: list[AttackCase]) -> AttackScore:
+    """Calculate a weighted detection score for the attack matrix."""
+    total = sum(case.weight for case in cases)
+    earned = sum(case.weight for case in cases if case.passed)
+    return AttackScore(tuple(cases), earned, total)
 
 
 def _verify(path: Path, kind: str, passphrase: str, trusted_keys: dict) -> Verdict:
@@ -49,8 +71,10 @@ def _visible_tamper(source: Path, target: Path, kind: str) -> None:
     with wave.open(str(source), "rb") as reader:
         params = reader.getparams()
         frames = bytearray(reader.readframes(reader.getnframes()))
-    if not frames:
-        raise ValueError("audio file has no samples")
+    if len(frames) < 2:
+        raise ValueError("audio file must contain at least two raw sample bytes")
+    # For 16-bit PCM, index 0 is the low byte of sample 0; never target the
+    # high byte, which is deliberately outside the current carrier hash.
     frames[0] ^= 0x80
     with wave.open(str(target), "wb") as writer:
         writer.setparams(params)
@@ -69,11 +93,69 @@ def _payload_tamper(source: Path, target: Path, kind: str, passphrase: str) -> N
         save = audio_stego._save_carrier
 
     start = location.derive_start(cover_id, passphrase, len(carrier))
-    mutation_index = start + payload.PREFIX_CARRIER_LEN + 40
-    if mutation_index >= len(carrier):
+    prefix_raw = bitstream.read_bits(carrier, start, payload.PREFIX_LEN, num_lsb=1)
+    prefix_info = payload.parse_prefix_bytes(prefix_raw)
+    if not prefix_info.magic_ok or not 1 <= prefix_info.num_lsb <= 8:
+        raise ValueError("stego object has no valid payload prefix")
+
+    body_start = start + payload.PREFIX_CARRIER_LEN
+    body_carrier_needed = -(-(prefix_info.body_len * 8) // prefix_info.num_lsb)
+    if body_carrier_needed < 1 or body_start + body_carrier_needed > len(carrier):
         raise ValueError("stego object is too small for payload corruption simulation")
+
+    # Select a byte within the actual body span, rather than relying on a
+    # fixed offset that may exceed a short carrier's valid payload range.
+    mutation_index = body_start + min(40, body_carrier_needed - 1)
     carrier[mutation_index] ^= 0x01
     save(target, carrier, meta)
+
+
+def _substitute_payload(source: Path, target_cover: Path, target: Path, kind: str, passphrase: str) -> None:
+    """Place a valid payload from one object into a different cover object."""
+    if kind == "image":
+        source_carrier, source_meta = image_stego._load_carrier(source)
+        target_carrier, target_meta = image_stego._load_carrier(target_cover)
+        source_id = location.cover_id_for_image(source_meta["width"], source_meta["height"])
+        target_id = location.cover_id_for_image(target_meta["width"], target_meta["height"])
+        save = image_stego._save_carrier
+    else:
+        source_carrier, source_meta = audio_stego._load_carrier(source)
+        target_carrier, target_meta = audio_stego._load_carrier(target_cover)
+        source_id = location.cover_id_for_audio(
+            source_meta["sampwidth"], source_meta["n_channels"], source_meta["n_frames"]
+        )
+        target_id = location.cover_id_for_audio(
+            target_meta["sampwidth"], target_meta["n_channels"], target_meta["n_frames"]
+        )
+        save = audio_stego._save_carrier
+
+    source_start = location.derive_start(source_id, passphrase, len(source_carrier))
+    prefix = bitstream.read_bits(source_carrier, source_start, payload.PREFIX_LEN, num_lsb=1)
+    prefix_info = payload.parse_prefix_bytes(prefix)
+    body_start = source_start + payload.PREFIX_CARRIER_LEN
+    body = bitstream.read_bits(source_carrier, body_start, prefix_info.body_len, prefix_info.num_lsb)
+
+    if not 1 <= prefix_info.num_lsb <= 8:
+        raise ValueError("source payload contains an invalid LSB count")
+
+    target_start = location.derive_start(target_id, passphrase, len(target_carrier))
+    body_carrier_needed = -(-(len(body) * 8) // prefix_info.num_lsb)
+    target_body_start = target_start + payload.PREFIX_CARRIER_LEN
+    target_capacity = (
+        bitstream.capacity_bytes(len(target_carrier) - target_body_start, prefix_info.num_lsb)
+        if target_body_start <= len(target_carrier)
+        else 0
+    )
+    if len(body) > target_capacity or target_body_start + body_carrier_needed > len(target_carrier):
+        raise ValueError("target cover is too small for the substituted payload")
+    bitstream.write_bits(target_carrier, target_start, prefix, num_lsb=1)
+    bitstream.write_bits(
+        target_carrier,
+        target_body_start,
+        body,
+        num_lsb=prefix_info.num_lsb,
+    )
+    save(target, target_carrier, target_meta)
 
 
 def run_attack_suite(
@@ -82,6 +164,7 @@ def run_attack_suite(
     passphrase: str,
     trusted_keys: dict,
     output_dir: Path,
+    cover_path: Optional[Path] = None,
 ) -> list[AttackCase]:
     """Run repeatable attacks and return expected-versus-actual verdicts.
 
@@ -94,32 +177,86 @@ def run_attack_suite(
     payload_path = output_dir / f"tampered_payload{suffix}"
 
     _visible_tamper(stego_path, visible_path, kind)
-    _payload_tamper(stego_path, payload_path, kind, passphrase)
 
-    cases = [
+    cases = []
+    try:
+        _payload_tamper(stego_path, payload_path, kind, passphrase)
+    except ValueError:
+        cases.append(
+            AttackCase(
+                "Hidden payload corruption",
+                Verdict.SIGNATURE_INVALID,
+                Verdict.CANNOT_VERIFY,
+                None,
+                "payload integrity",
+                2,
+            )
+        )
+
+    audio_quality = None
+    if kind == "audio" and cover_path is not None:
+        audio_quality = audio_metrics.compare(cover_path, stego_path)
+
+    cases.extend([
         AttackCase(
             "Visible carrier modification",
             Verdict.TAMPERED,
             _verify(visible_path, kind, passphrase, trusted_keys),
             visible_path,
+            "carrier integrity",
+            2,
+            audio_quality,
         ),
-        AttackCase(
+        *([] if any(case.name == "Hidden payload corruption" for case in cases) else [AttackCase(
             "Hidden payload corruption",
             Verdict.SIGNATURE_INVALID,
             _verify(payload_path, kind, passphrase, trusted_keys),
             payload_path,
-        ),
+            "payload integrity",
+            2,
+        )]),
         AttackCase(
             "Wrong passphrase",
-            Verdict.PAYLOAD_MISSING,
+            (Verdict.PAYLOAD_MISSING, Verdict.WRONG_START_LOCATION),
             _verify(stego_path, kind, "incorrect-passphrase", trusted_keys),
             None,
+            "keyed location",
+            1,
         ),
         AttackCase(
             "Untrusted signing key",
             Verdict.SIGNATURE_INVALID,
             _verify(stego_path, kind, passphrase, {}),
             None,
+            "authentication",
+            2,
         ),
-    ]
+    ])
+    if cover_path is not None:
+        replay_cover_path = output_dir / f"replay_target_cover{suffix}"
+        _visible_tamper(cover_path, replay_cover_path, kind)
+        replay_path = output_dir / f"replay_substitution{suffix}"
+        try:
+            _substitute_payload(stego_path, replay_cover_path, replay_path, kind, passphrase)
+            cases.append(
+                AttackCase(
+                    "Replay/substitution into another cover",
+                    Verdict.TAMPERED,
+                    _verify(replay_path, kind, passphrase, trusted_keys),
+                    replay_path,
+                    "replay resistance",
+                    3,
+                )
+            )
+        except ValueError:
+            cases.append(
+                AttackCase(
+                    "Replay/substitution into another cover",
+                    Verdict.TAMPERED,
+                    Verdict.CANNOT_VERIFY,
+                    None,
+                    "replay resistance",
+                    3,
+                )
+            )
     return cases

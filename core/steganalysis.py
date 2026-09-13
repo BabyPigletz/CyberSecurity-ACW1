@@ -9,7 +9,7 @@ and the point of this module is to demonstrate the detector's-eye view.
 
 import math
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Iterable, List, Tuple
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,19 @@ class PairedAnalysis:
     suspicious_offsets: List[int]
     cover_max_pvalue: float
     stego_max_pvalue: float
+
+    @property
+    def likely_hidden_data(self) -> bool:
+        return bool(self.suspicious_offsets)
+
+
+@dataclass(frozen=True)
+class MultiScaleAnalysis:
+    """Results from paired analysis at several window scales."""
+
+    scales: Tuple[Tuple[int, int, PairedAnalysis], ...]
+    suspicious_offsets: List[int]
+    agreement_percent: float
 
     @property
     def likely_hidden_data(self) -> bool:
@@ -157,3 +170,27 @@ def compare(
         cover_max_pvalue=max(cover_pvalues, default=0.0),
         stego_max_pvalue=max(stego_pvalues, default=0.0),
     )
+
+
+def compare_multiscale(
+    cover: bytes,
+    stego: bytes,
+    scales: Iterable[Tuple[int, int]] = ((512, 256), (1024, 512), (2048, 1024)),
+    stego_threshold: float = 0.9,
+    delta_threshold: float = 0.2,
+) -> MultiScaleAnalysis:
+    """Compare cover/stego pairs at multiple window sizes.
+
+    An offset is reported once if any scale identifies it. Agreement measures
+    how many configured scales found at least one suspicious window.
+    """
+    results = tuple(
+        (window, step, compare(cover, stego, window, step, stego_threshold, delta_threshold))
+        for window, step in scales
+    )
+    suspicious = sorted(
+        {offset for _, _, result in results for offset in result.suspicious_offsets}
+    )
+    detected_scales = sum(bool(result.suspicious_offsets) for _, _, result in results)
+    agreement = detected_scales / len(results) * 100.0 if results else 0.0
+    return MultiScaleAnalysis(results, suspicious, agreement)

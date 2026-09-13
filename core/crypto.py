@@ -50,23 +50,26 @@ def load_keypair(pub_path: Path, priv_path: "Path | None" = None) -> KeyPair:
     return KeyPair(key_id=_fingerprint(public_key), public_key=public_key, private_key=private_key)
 
 
-def derive_offset_key(passphrase: str) -> bytes:
-    """hmac_key from the FIXED constant salt - never the random per-embed salt.
-
-    Needs only the passphrase; safe to call before any file is read or written.
-    """
-    master = PBKDF2HMAC(
-        algorithm=hashes.SHA256(), length=64, salt=_FIXED_OFFSET_SALT, iterations=_PBKDF2_ITERATIONS
+def _derive_master_key(passphrase: str, salt: bytes) -> bytes:
+    """Derive one passphrase-bound master value for a specific salt context."""
+    return PBKDF2HMAC(
+        algorithm=hashes.SHA256(), length=64, salt=salt, iterations=_PBKDF2_ITERATIONS
     ).derive(passphrase.encode("utf-8"))
-    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"ACW1-offset").derive(master)
+
+
+def _derive_subkey(master: bytes, context: bytes) -> bytes:
+    """Derive an independent 256-bit subkey using a domain-separated label."""
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=context).derive(master)
+
+
+def derive_offset_key(passphrase: str) -> bytes:
+    """Derive the location key from a fixed pre-embedding salt context."""
+    return _derive_subkey(_derive_master_key(passphrase, _FIXED_OFFSET_SALT), b"ACW1-offset")
 
 
 def derive_aes_key(passphrase: str, random_salt: bytes) -> bytes:
     """aes_key from a random, per-embed salt (stored in the body, read before this is called on decode)."""
-    master = PBKDF2HMAC(
-        algorithm=hashes.SHA256(), length=64, salt=random_salt, iterations=_PBKDF2_ITERATIONS
-    ).derive(passphrase.encode("utf-8"))
-    return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"ACW1-aes").derive(master)
+    return _derive_subkey(_derive_master_key(passphrase, random_salt), b"ACW1-aes")
 
 
 def encrypt(aes_key: bytes, plaintext: bytes) -> "tuple[bytes, bytes]":

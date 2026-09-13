@@ -67,6 +67,22 @@ def test_paired_analysis_highlights_change_against_original_cover():
     assert result.stego_max_pvalue > result.cover_max_pvalue
 
 
+def test_multiscale_analysis_reports_scale_agreement():
+    cover = bytes([10, 10, 10, 50, 50, 90] * 3000)
+    stego = bytearray(cover)
+    stego[4096:8192] = bytes([0, 1, 2, 3, 4, 5] * 683)[:4096]
+
+    result = steganalysis.compare_multiscale(
+        cover,
+        bytes(stego),
+        scales=((2048, 1024), (4096, 2048)),
+    )
+
+    assert len(result.scales) == 2
+    assert result.likely_hidden_data
+    assert result.agreement_percent > 0
+
+
 def test_against_real_committed_cover_documents_current_behaviour():
     """Not a pass/fail claim about detection quality - documents what
     actually happens against this project's own synthetic gradient cover

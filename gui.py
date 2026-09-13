@@ -347,17 +347,36 @@ class ACW1(tk.Tk):
                 passphrase,
                 self._trusted_keys,
                 Path(output_dir),
+                cover_path=self.cover_path,
             )
         except Exception as exc:
             messagebox.showerror("Attack simulation failed", str(exc))
             return
 
+        score = attack_simulation.score_cases(cases)
         lines = [
             f"{case.name}: {case.actual.name} ({'PASS' if case.passed else 'UNEXPECTED'})"
             for case in cases
         ]
-        self._set_payload_text("Attack simulation\n\n" + "\n".join(lines))
-        self.status_var.set(f"Attack simulation completed: {sum(case.passed for case in cases)}/{len(cases)} passed")
+        report = (
+            "Attack simulation\n\n"
+            + "\n".join(lines)
+            + f"\n\nDetection score: {score.earned_points}/{score.total_points} "
+            f"({score.detection_percent:.0f}%)"
+        )
+        quality = next((case.audio_quality for case in cases if case.audio_quality is not None), None)
+        if quality is not None:
+            report += (
+                "\n\nAudio quality after embedding"
+                f"\nChanged samples: {quality.changed_percent:.2f}%"
+                f"\nMean absolute error: {quality.mean_absolute_error:.3f}"
+                f"\nMaximum sample difference: {quality.maximum_absolute_error}"
+                f"\nSNR: {quality.signal_to_noise_db:.2f} dB"
+            )
+        self._set_payload_text(report)
+        self.status_var.set(
+            f"Attack simulation completed: {score.earned_points}/{score.total_points} points"
+        )
 
     def compare_steganalysis(self):
         if self.cover_path is None or self.stego_path is None or self.active_kind is None:
@@ -370,16 +389,15 @@ class ACW1(tk.Tk):
             else:
                 cover, _ = audio_stego._load_carrier(self.cover_path)
                 stego, _ = audio_stego._load_carrier(self.stego_path)
-            result = steganalysis.compare(bytes(cover), bytes(stego), window=2048, step=1024)
+            result = steganalysis.compare_multiscale(bytes(cover), bytes(stego))
         except Exception as exc:
             messagebox.showerror("Steganalysis failed", str(exc))
             return
 
         report = (
             "Paired steganalysis\n\n"
-            f"Windows analysed: {len(result.windows)}\n"
-            f"Cover maximum p-value: {result.cover_max_pvalue:.4f}\n"
-            f"Stego maximum p-value: {result.stego_max_pvalue:.4f}\n"
+            f"Scales analysed: {len(result.scales)}\n"
+            f"Scale agreement: {result.agreement_percent:.0f}%\n"
             f"Suspicious windows: {len(result.suspicious_offsets)}\n"
             f"Assessment: {'LIKELY HIDDEN DATA' if result.likely_hidden_data else 'NO STRONG DIFFERENCE'}\n\n"
             "This is statistical evidence, not proof of tampering."
