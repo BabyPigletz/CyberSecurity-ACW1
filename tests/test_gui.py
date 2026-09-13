@@ -141,6 +141,56 @@ def test_signature_invalid_withholds_payload_and_explains_why(app):
     assert "P1-6" not in text
 
 
+def _load_cover(app, path):
+    import gui as gui_mod
+
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value=str(path)):
+        app.load_cover()
+
+
+def test_message_typed_in_gui_is_recovered_exactly(app, tmp_path):
+    import gui as gui_mod
+
+    _load_cover(app, SAMPLES / "cover.png")
+    app.passphrase_var.set("gui-message-test")
+    message = "Line one — “smart quotes”, café\nsecond line\n\ttrailing spaces   "
+    app.message_input.insert("1.0", message)
+
+    out_path = tmp_path / "with_message.png"
+    with mock.patch.object(gui_mod.filedialog, "asksaveasfilename", return_value=str(out_path)):
+        app.embed_payload()
+
+    assert _verify(app, out_path) == "AUTHENTIC"
+    assert app.message_output.get("1.0", "end-1c") == message
+    assert "trailing spaces" not in app.payload_text.get("1.0", "end")
+
+
+def test_empty_message_shows_metadata_only_note(app):
+    assert _verify(app, SAMPLES / "stego_image_authentic.png", PASSPHRASE) == "AUTHENTIC"
+    assert "no message was embedded" in app.message_output.get("1.0", "end-1c")
+
+
+def test_signature_invalid_withholds_message(app):
+    assert _verify(app, SAMPLES / "stego_image_wrong_key.png", PASSPHRASE) == "SIGNATURE_INVALID"
+    assert "withheld" in app.message_output.get("1.0", "end-1c")
+
+
+def test_message_size_label_tracks_message_and_lsb(app):
+    _load_cover(app, SAMPLES / "cover.png")  # 600x600 -> 1,080,000 carrier bytes
+    assert "Fits" in app.message_size_var.get()
+
+    app.message_input.insert("1.0", "x" * 80000)
+    app.update()
+    assert "May not fit" in app.message_size_var.get()
+
+    app.message_input.insert("end", "x" * 120000)
+    app.update()
+    assert "Too large" in app.message_size_var.get()
+
+    app.lsb_var.set(8)
+    assert "Fits" in app.message_size_var.get()
+
+
 def test_cover_picker_offers_no_jpeg(app):
     import gui as gui_mod
 

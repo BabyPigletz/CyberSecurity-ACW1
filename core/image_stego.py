@@ -31,6 +31,11 @@ def capacity_bytes(image: Image.Image, num_lsb: int = 1) -> int:
     return bitstream.capacity_bytes(width * height * CHANNELS, num_lsb)
 
 
+def carrier_len(path: Path) -> int:
+    width, height = Image.open(path).size
+    return width * height * CHANNELS
+
+
 def _load_carrier(path: Path):
     img = Image.open(path)
     if img.format not in SUPPORTED_FORMATS:

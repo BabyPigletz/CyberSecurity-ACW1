@@ -36,8 +36,9 @@ PNG/WAV and one sample per verdict) if you ever need to regenerate them;
 ## What it does
 
 Given a cover PNG or WAV and a passphrase, the tool derives a start location
-inside the file, encrypts and signs a small JSON payload (media ID, timestamp,
-nonce, team metadata, a hash of the cover, and the signer's key id), and writes
+inside the file, encrypts and signs a JSON payload (an optional message you
+type in, plus media ID, timestamp, nonce, team metadata, a hash of the cover,
+and the signer's key id), and writes
 it into the low bits of the cover starting at that location. Extraction
 reverses the process from the passphrase alone — no side channel carries the
 offset, the LSB count, or the key — and produces a verdict rather than a bare
