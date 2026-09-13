@@ -108,6 +108,29 @@ def test_embed_button_then_verify_button_round_trip(app, tmp_path):
     assert _verify(app, out_path) == "AUTHENTIC"
 
 
+def test_cover_picker_offers_no_jpeg(app):
+    import gui as gui_mod
+
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value="") as dialog:
+        app.load_cover()
+    patterns = " ".join(pattern for _, pattern in dialog.call_args.kwargs["filetypes"]).lower()
+    assert "jpg" not in patterns and "jpeg" not in patterns and "*.*" not in patterns
+
+
+def test_jpeg_cover_rejected_at_load(app, tmp_path):
+    import gui as gui_mod
+
+    jpeg_path = tmp_path / "disguised_jpeg.png"
+    Image.new("RGB", (64, 64), color=(10, 20, 30)).save(jpeg_path, format="JPEG")
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value=str(jpeg_path)):
+        with mock.patch.object(gui_mod.messagebox, "showerror") as mock_error:
+            app.load_cover()
+
+    assert mock_error.called
+    assert app.cover_path is None
+    assert str(app.embed_button["state"]) == "disabled"
+
+
 def test_oversized_payload_rejected_via_embed_button(app, tmp_path):
     import gui as gui_mod
 

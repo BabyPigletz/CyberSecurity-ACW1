@@ -192,8 +192,11 @@ don't assume the synthetic samples in this repo will show the effect.
   naive `C * num_lsb / 8` figure.
 - **LSB fragility.** Any recompression (saving stego output as JPEG) or
   resampling (audio sample-rate conversion) destroys the low bits the payload
-  lives in. The tool only supports PNG and uncompressed PCM WAV for exactly
-  this reason.
+  lives in. The tool only supports PNG/BMP images and uncompressed PCM WAV for
+  exactly this reason. JPEG covers are rejected outright because LSB
+  steganography requires a lossless format, and earlier versions silently
+  converted JPEG input to PNG output, which meant the "cover" shown in the GUI
+  and the file the payload was actually embedded into were two different files.
 - **Passphrase as single point of failure.** It drives both the encryption
   key and the offset-derivation key. Lose it and the payload is
   unrecoverable, even by whoever embedded it; leak it and both

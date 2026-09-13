@@ -23,7 +23,7 @@ from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 
 from core import audio_stego, crypto, image_stego
-from core.errors import CapacityError
+from core.errors import CapacityError, UnsupportedFormatError
 from core.verdict import Verdict
 
 KEYS_DIR = Path(__file__).resolve().parent / "keys"
@@ -152,7 +152,7 @@ class ACW1(tk.Tk):
     def load_cover(self):
         path = filedialog.askopenfilename(
             title="Select Cover Object",
-            filetypes=[("Cover files", "*.png *.bmp *.jpg *.jpeg *.wav"), ("All files", "*.*")],
+            filetypes=[("Cover files", "*.png *.bmp *.wav")],
         )
         if not path:
             return
@@ -177,6 +177,8 @@ class ACW1(tk.Tk):
 
     def _populate_image_panel(self, role: str, path: Path):
         img = Image.open(path)
+        if role == "cover" and img.format not in image_stego.SUPPORTED_FORMATS:
+            raise UnsupportedFormatError(f"{img.format} covers are not supported - use PNG or BMP (lossless)")
         img.load()
         preview = img.copy()
         preview.thumbnail(self.THUMB_MAX_SIZE)
@@ -187,7 +189,7 @@ class ACW1(tk.Tk):
 
         cap = image_stego.capacity_bytes(img, num_lsb=self.lsb_var.get())
         getattr(self, f"{role}_info_label").config(
-            text=f"{img.size[0]} x {img.size[1]} PNG\ncapacity @ {self.lsb_var.get()} LSB: {cap:,} bytes"
+            text=f"{img.size[0]} x {img.size[1]} {img.format}\ncapacity @ {self.lsb_var.get()} LSB: {cap:,} bytes"
         )
         getattr(self, f"{role}_play_button").config(state=tk.DISABLED)
 

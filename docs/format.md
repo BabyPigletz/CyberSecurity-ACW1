@@ -35,8 +35,9 @@ carrier byte, immediately following the prefix region.
   transparent pixels is visible, and some tools normalise it.
 - Carrier sequence = raw pixel bytes in row-major order: `R0,G0,B0,R1,G1,B1,...`
 - `C = width * height * 3`
-- Reject JPEG on the embed path; lossy recompression destroys LSB data. Loading a JPEG
-  cover and saving the stego as PNG is fine. Saving stego as JPEG is not.
+- Cover must be PNG or BMP (lossless), detected from file content rather than extension.
+  JPEG is rejected outright: at embed time with an error, at verify time as
+  `CANNOT_VERIFY`. Stego output is always written as PNG.
 
 ### WAV / PCM (audio)
 
