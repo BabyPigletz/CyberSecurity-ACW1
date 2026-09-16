@@ -20,6 +20,12 @@ Demo keypairs live under `keys/` (`demo_a`: full pair; `demo_b`: public key
 only, used to produce the wrong-key negative case). Do not treat either as a
 real secret — see `docs/format.md` §6.
 
+Audio playback uses the operating system's own player, so no extra Python
+package is needed: `winsound` on Windows and `afplay` on macOS are built in;
+on Linux the app uses `paplay`, `pw-play` or `aplay`, whichever is installed.
+On Ubuntu or WSL, install one with `sudo apt install pulseaudio-utils` (WSLg
+already provides the PulseAudio server it talks to).
+
 To run the test suite (95 tests, all against synthetic data or the fixtures
 in `samples/` — no real image/audio hardware needed except for actually
 *hearing* playback, which the tests don't attempt):
@@ -36,8 +42,9 @@ PNG/WAV and one sample per verdict) if you ever need to regenerate them;
 ## What it does
 
 Given a cover PNG or WAV and a passphrase, the tool derives a start location
-inside the file, encrypts and signs a small JSON payload (media ID, timestamp,
-nonce, team metadata, a hash of the cover, and the signer's key id), and writes
+inside the file, encrypts and signs a JSON payload (an optional message you
+type in, plus media ID, timestamp, nonce, team metadata, a hash of the cover,
+and the signer's key id), and writes
 it into the low bits of the cover starting at that location. Extraction
 reverses the process from the passphrase alone — no side channel carries the
 offset, the LSB count, or the key — and produces a verdict rather than a bare
@@ -192,8 +199,11 @@ don't assume the synthetic samples in this repo will show the effect.
   naive `C * num_lsb / 8` figure.
 - **LSB fragility.** Any recompression (saving stego output as JPEG) or
   resampling (audio sample-rate conversion) destroys the low bits the payload
-  lives in. The tool only supports PNG and uncompressed PCM WAV for exactly
-  this reason.
+  lives in. The tool only supports PNG/BMP images and uncompressed PCM WAV for
+  exactly this reason. JPEG covers are rejected outright because LSB
+  steganography requires a lossless format, and earlier versions silently
+  converted JPEG input to PNG output, which meant the "cover" shown in the GUI
+  and the file the payload was actually embedded into were two different files.
 - **Passphrase as single point of failure.** It drives both the encryption
   key and the offset-derivation key. Lose it and the payload is
   unrecoverable, even by whoever embedded it; leak it and both

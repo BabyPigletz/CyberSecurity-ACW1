@@ -1,7 +1,10 @@
 import os
 from pathlib import Path
 
-from core import bitstream, crypto, payload as payload_mod
+import pytest
+
+from core import bitstream, crypto, location, payload as payload_mod
+from core.errors import CapacityError
 from core.verdict import Verdict
 
 KEYS = Path(__file__).resolve().parent.parent / "keys"
@@ -22,10 +25,74 @@ def test_round_trip_authentic():
     start = payload_mod.embed(carrier, COVER_ID, {"meta": {"team": "P1-6"}}, "hunter2", demo_a, num_lsb=3)
     assert start > 0
 
-    verdict, parsed = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
+    verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
     assert verdict == Verdict.AUTHENTIC
-    assert parsed["signer_key_id"] == demo_a.key_id
-    assert parsed["meta"]["team"] == "P1-6"
+    assert extracted.cover_hash_matches
+    assert extracted.payload["signer_key_id"] == demo_a.key_id
+    assert extracted.payload["meta"]["team"] == "P1-6"
+
+
+SHORT_MESSAGE = "Meet at the library at 3pm."
+UNICODE_MESSAGE = "Line one — “smart quotes”, café, 中文\nemoji: 😀\n\ttrailing spaces   "
+
+
+def _embedded_body_len(carrier, passphrase):
+    start = location.derive_start(COVER_ID, passphrase, len(carrier))
+    raw = bitstream.read_bits(carrier, start, payload_mod.PREFIX_LEN, num_lsb=1)
+    return payload_mod.parse_prefix_bytes(raw).body_len
+
+
+def test_message_round_trips_byte_for_byte():
+    demo_a, _ = _keys()
+    trusted = {demo_a.key_id: demo_a.public_key}
+    for message in (SHORT_MESSAGE, UNICODE_MESSAGE, "x" * 5000):
+        carrier = bytearray(os.urandom(200000))
+        payload_mod.embed(carrier, COVER_ID, {"message": message}, "hunter2", demo_a, num_lsb=2)
+
+        verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
+        assert verdict == Verdict.AUTHENTIC
+        assert extracted.payload["message"].encode("utf-8") == message.encode("utf-8")
+
+
+def test_empty_message_keeps_metadata_only_payload():
+    demo_a, _ = _keys()
+    trusted = {demo_a.key_id: demo_a.public_key}
+    body_lens = []
+    for fields in ({}, {"message": ""}):
+        carrier = bytearray(os.urandom(20000))
+        payload_mod.embed(carrier, COVER_ID, fields, "hunter2", demo_a, num_lsb=2)
+
+        verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
+        assert verdict == Verdict.AUTHENTIC
+        assert "message" not in extracted.payload
+        body_lens.append(_embedded_body_len(carrier, "hunter2"))
+    assert body_lens[0] == body_lens[1]
+
+
+def test_estimate_body_len_matches_real_embed():
+    demo_a, _ = _keys()
+    meta = {"team": "P1-6"}
+    for message in ("", SHORT_MESSAGE, UNICODE_MESSAGE, 'q"uote\\' * 300):
+        carrier = bytearray(os.urandom(60000))
+        payload_mod.embed(carrier, COVER_ID, {"message": message, "meta": meta}, "hunter2", demo_a, num_lsb=1)
+        assert _embedded_body_len(carrier, "hunter2") == payload_mod.estimate_body_len(message, meta, demo_a)
+
+
+def test_capacity_boundary_exact_fit_then_one_byte_over():
+    demo_a, _ = _keys()
+    carrier_len, num_lsb, passphrase = 30000, 1, "hunter2"
+    start = location.derive_start(COVER_ID, passphrase, carrier_len)
+    capacity = payload_mod.max_body_len(carrier_len, start, num_lsb)
+    overhead = payload_mod.estimate_body_len("a", {}, demo_a) - 1  # everything except the message characters
+    exact_fit = "a" * (capacity - overhead)
+
+    payload_mod.embed(bytearray(os.urandom(carrier_len)), COVER_ID, {"message": exact_fit}, passphrase, demo_a, num_lsb)
+
+    with pytest.raises(CapacityError) as excinfo:
+        payload_mod.embed(
+            bytearray(os.urandom(carrier_len)), COVER_ID, {"message": exact_fit + "a"}, passphrase, demo_a, num_lsb
+        )
+    assert f"at most {capacity:,} bytes" in str(excinfo.value)
 
 
 def test_wrong_passphrase_is_payload_missing_or_wrong_location():
@@ -34,20 +101,21 @@ def test_wrong_passphrase_is_payload_missing_or_wrong_location():
     carrier = bytearray(os.urandom(20000))
     payload_mod.embed(carrier, COVER_ID, {}, "correct-pass", demo_a, num_lsb=2)
 
-    verdict, parsed = payload_mod.verify(carrier, COVER_ID, "wrong-pass", trusted)
+    verdict, extracted = payload_mod.verify(carrier, COVER_ID, "wrong-pass", trusted)
     assert verdict in (Verdict.PAYLOAD_MISSING, Verdict.WRONG_START_LOCATION)
-    assert parsed is None
+    assert extracted is None
 
 
 def test_wrong_key_is_signature_invalid():
     demo_a, demo_b = _keys()
-    # Embed signed by demo_a, but the verifier only trusts demo_b.
+    # Embed signed by demo_a, but the verifier only trusts demo_b. The passphrase is
+    # correct, so decryption succeeds - the payload must still be withheld.
     carrier = bytearray(os.urandom(20000))
     payload_mod.embed(carrier, COVER_ID, {}, "hunter2", demo_a, num_lsb=1)
 
-    verdict, parsed = payload_mod.verify(carrier, COVER_ID, "hunter2", {demo_b.key_id: demo_b.public_key})
+    verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", {demo_b.key_id: demo_b.public_key})
     assert verdict == Verdict.SIGNATURE_INVALID
-    assert parsed is None
+    assert extracted is None
 
 
 def test_tampered_high_bit_after_embed_is_tampered():
@@ -61,9 +129,10 @@ def test_tampered_high_bit_after_embed_is_tampered():
     victim = len(carrier) - 1
     carrier[victim] ^= 0b10000000
 
-    verdict, parsed = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
+    verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
     assert verdict == Verdict.TAMPERED
-    assert parsed is None
+    assert extracted is not None and not extracted.cover_hash_matches
+    assert extracted.payload["signer_key_id"] == demo_a.key_id
 
 
 def test_tampered_ciphertext_byte_is_signature_invalid_not_gcm():
@@ -83,9 +152,9 @@ def test_tampered_ciphertext_byte_is_signature_invalid_not_gcm():
     victim = start + payload_mod.PREFIX_CARRIER_LEN + 40
     carrier[victim] ^= 0x01
 
-    verdict, parsed = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
+    verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
     assert verdict == Verdict.SIGNATURE_INVALID
-    assert parsed is None
+    assert extracted is None
 
 
 def test_no_payload_at_all_is_payload_missing():
@@ -93,9 +162,9 @@ def test_no_payload_at_all_is_payload_missing():
     trusted = {demo_a.key_id: demo_a.public_key}
     carrier = bytearray(os.urandom(20000))  # never embedded into
 
-    verdict, parsed = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
+    verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
     assert verdict == Verdict.PAYLOAD_MISSING
-    assert parsed is None
+    assert extracted is None
 
 
 def test_stray_magic_at_zero_is_wrong_start_location():
@@ -107,9 +176,9 @@ def test_stray_magic_at_zero_is_wrong_start_location():
     # with no real payload at the (different) derived offset.
     bitstream.write_bits(carrier, 0, payload_mod.build_prefix(1, 999), num_lsb=1)
 
-    verdict, parsed = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
+    verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
     assert verdict == Verdict.WRONG_START_LOCATION
-    assert parsed is None
+    assert extracted is None
 
 
 def test_capacity_error_raised_before_writing_anything():
@@ -167,6 +236,6 @@ def test_signature_stripping_is_caught_by_signer_key_id():
 
     # Verifier trusts both keys (the scenario signer_key_id is meant for).
     trusted = {demo_a.key_id: demo_a.public_key, forged_kp.key_id: forged_kp.public_key}
-    verdict, parsed = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
+    verdict, extracted = payload_mod.verify(carrier, COVER_ID, "hunter2", trusted)
     assert verdict == Verdict.SIGNATURE_INVALID
-    assert parsed is None
+    assert extracted is None

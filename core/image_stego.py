@@ -1,4 +1,4 @@
-"""LSB Replacement Steganography for image cover objects (PNG, RGB, alpha excluded).
+"""LSB Replacement Steganography for image cover objects (PNG/BMP, RGB, alpha excluded).
 
 Knows PNG/PIL I/O and docs/format.md §2's carrier-selection rule only - all
 crypto, framing, and verdict logic live in core/payload.py and are called
@@ -12,9 +12,11 @@ from PIL import Image
 from core import bitstream, location
 from core import payload as payload_mod
 from core.crypto import KeyPair
+from core.errors import UnsupportedFormatError
 from core.verdict import Verdict
 
 CHANNELS = 3  # RGB; alpha excluded (§2) - visible transparency edits are conspicuous
+SUPPORTED_FORMATS = ("PNG", "BMP")  # lossless only; detected from file content, not extension
 
 
 def capacity_bytes(image: Image.Image, num_lsb: int = 1) -> int:
@@ -29,13 +31,15 @@ def capacity_bytes(image: Image.Image, num_lsb: int = 1) -> int:
     return bitstream.capacity_bytes(width * height * CHANNELS, num_lsb)
 
 
+def carrier_len(path: Path) -> int:
+    width, height = Image.open(path).size
+    return width * height * CHANNELS
+
+
 def _load_carrier(path: Path):
-    # §2 permits loading a JPEG *cover* (it's decoded to raw RGB in memory and
-    # always re-saved as PNG below) - it only forbids saving the *stego output*
-    # as JPEG, which would recompress and destroy the just-written LSB data.
-    # _save_carrier always writes PNG regardless of out_path's extension, so
-    # that constraint is enforced structurally rather than by rejecting inputs.
     img = Image.open(path)
+    if img.format not in SUPPORTED_FORMATS:
+        raise UnsupportedFormatError(f"{img.format} covers are not supported - use PNG or BMP (lossless)")
     img = img.convert("RGB")
     width, height = img.size
     carrier = bytearray(img.tobytes())  # row-major R,G,B,R,G,B,...
@@ -61,11 +65,11 @@ def encode(in_path: Path, out_path: Path, payload_fields: dict, passphrase: str,
 
 def decode(path: Path, passphrase: str, trusted_keys: dict):
     """Extract and verify. Never raises for expected failure modes - always
-    returns (Verdict, payload_dict_or_None).
+    returns (Verdict, payload.Extracted or None).
     """
     try:
         carrier, meta = _load_carrier(path)
-    except OSError:
+    except (UnsupportedFormatError, OSError):
         return Verdict.CANNOT_VERIFY, None
 
     cover_id = location.cover_id_for_image(meta["width"], meta["height"])

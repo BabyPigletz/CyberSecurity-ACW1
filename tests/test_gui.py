@@ -10,7 +10,9 @@ Requires a reachable display (tk.Tk() must be able to connect) - skipped
 automatically if none is available (e.g. a CI runner with no X server/Xvfb).
 """
 
+import sys
 import tempfile
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -108,6 +110,135 @@ def test_embed_button_then_verify_button_round_trip(app, tmp_path):
     assert _verify(app, out_path) == "AUTHENTIC"
 
 
+def _panel_hashes(app):
+    lines = app.payload_text.get("1.0", "end").splitlines()
+    embedded = lines[lines.index("Cover hash embedded at signing:") + 1]
+    recomputed = lines[lines.index("Cover hash recomputed now:") + 1]
+    return embedded, recomputed
+
+
+def test_authentic_shows_payload_and_matching_hashes(app):
+    assert _verify(app, SAMPLES / "stego_image_authentic.png", PASSPHRASE) == "AUTHENTIC"
+    text = app.payload_text.get("1.0", "end")
+    embedded, recomputed = _panel_hashes(app)
+    assert len(embedded) == 64 and embedded == recomputed
+    assert "Match: yes" in text
+    assert '"team": "P1-6"' in text
+
+
+def test_tampered_shows_payload_and_failed_hash_comparison(app):
+    assert _verify(app, SAMPLES / "stego_image_tampered.png", PASSPHRASE) == "TAMPERED"
+    text = app.payload_text.get("1.0", "end")
+    embedded, recomputed = _panel_hashes(app)
+    assert len(embedded) == 64 and len(recomputed) == 64 and embedded != recomputed
+    assert "Match: NO" in text
+    assert '"team": "P1-6"' in text
+
+
+def test_signature_invalid_withholds_payload_and_explains_why(app):
+    assert _verify(app, SAMPLES / "stego_image_wrong_key.png", PASSPHRASE) == "SIGNATURE_INVALID"
+    text = app.payload_text.get("1.0", "end")
+    assert "signature did not verify" in text
+    assert "Cover hash" not in text
+    assert "P1-6" not in text
+
+
+def _load_cover(app, path):
+    import gui as gui_mod
+
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value=str(path)):
+        app.load_cover()
+
+
+def test_message_typed_in_gui_is_recovered_exactly(app, tmp_path):
+    import gui as gui_mod
+
+    _load_cover(app, SAMPLES / "cover.png")
+    app.passphrase_var.set("gui-message-test")
+    message = "Line one — “smart quotes”, café\nsecond line\n\ttrailing spaces   "
+    app.message_input.insert("1.0", message)
+
+    out_path = tmp_path / "with_message.png"
+    with mock.patch.object(gui_mod.filedialog, "asksaveasfilename", return_value=str(out_path)):
+        app.embed_payload()
+
+    assert _verify(app, out_path) == "AUTHENTIC"
+    assert app.message_output.get("1.0", "end-1c") == message
+    assert "trailing spaces" not in app.payload_text.get("1.0", "end")
+
+
+def test_empty_message_shows_metadata_only_note(app, tmp_path):
+    import gui as gui_mod
+
+    _load_cover(app, SAMPLES / "cover.png")
+    app.passphrase_var.set("metadata-only")
+    out_path = tmp_path / "metadata_only.png"
+    with mock.patch.object(gui_mod.filedialog, "asksaveasfilename", return_value=str(out_path)):
+        app.embed_payload()
+
+    assert _verify(app, out_path) == "AUTHENTIC"
+    assert "no message was embedded" in app.message_output.get("1.0", "end-1c")
+
+
+def test_signature_invalid_withholds_message(app):
+    assert _verify(app, SAMPLES / "stego_image_wrong_key.png", PASSPHRASE) == "SIGNATURE_INVALID"
+    assert "withheld" in app.message_output.get("1.0", "end-1c")
+
+
+def test_message_size_label_tracks_message_and_lsb(app):
+    _load_cover(app, SAMPLES / "cover.png")  # 600x600 -> 1,080,000 carrier bytes
+    assert "Fits" in app.message_size_var.get()
+
+    app.message_input.insert("1.0", "x" * 80000)
+    app.update()
+    assert "May not fit" in app.message_size_var.get()
+
+    app.message_input.insert("end", "x" * 120000)
+    app.update()
+    assert "Too large" in app.message_size_var.get()
+
+    app.lsb_var.set(8)
+    assert "Fits" in app.message_size_var.get()
+
+
+def test_details_box_sits_between_verify_and_start_location_in_control_column(app):
+    _verify(app, SAMPLES / "stego_image_authentic.png", PASSPHRASE)
+    app.update()
+
+    verify_bottom = app.verify_button.winfo_rooty() + app.verify_button.winfo_height()
+    details_top = app.payload_text.winfo_rooty()
+    details_bottom = details_top + app.payload_text.winfo_height()
+    assert verify_bottom <= details_top
+    assert details_bottom <= app.start_location_label.winfo_rooty()
+
+    control_column_left = app.embed_button.winfo_rootx()
+    assert app.payload_text.winfo_rootx() >= control_column_left
+    assert app.message_output.winfo_rootx() < control_column_left
+
+
+def test_cover_picker_offers_no_jpeg(app):
+    import gui as gui_mod
+
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value="") as dialog:
+        app.load_cover()
+    patterns = " ".join(pattern for _, pattern in dialog.call_args.kwargs["filetypes"]).lower()
+    assert "jpg" not in patterns and "jpeg" not in patterns and "*.*" not in patterns
+
+
+def test_jpeg_cover_rejected_at_load(app, tmp_path):
+    import gui as gui_mod
+
+    jpeg_path = tmp_path / "disguised_jpeg.png"
+    Image.new("RGB", (64, 64), color=(10, 20, 30)).save(jpeg_path, format="JPEG")
+    with mock.patch.object(gui_mod.filedialog, "askopenfilename", return_value=str(jpeg_path)):
+        with mock.patch.object(gui_mod.messagebox, "showerror") as mock_error:
+            app.load_cover()
+
+    assert mock_error.called
+    assert app.cover_path is None
+    assert str(app.embed_button["state"]) == "disabled"
+
+
 def test_oversized_payload_rejected_via_embed_button(app, tmp_path):
     import gui as gui_mod
 
@@ -138,3 +269,79 @@ def test_play_button_degrades_gracefully_without_a_system_player(app):
         with mock.patch.object(gui_mod.messagebox, "showinfo") as mock_info:
             app.stego_play_button.invoke()
             assert mock_info.called
+
+
+def _fake_player(tmp_path, script):
+    player = tmp_path / "paplay"
+    player.write_text("#!/bin/sh\n" + script)
+    player.chmod(0o755)
+    return str(player)
+
+
+def _only(name, path):
+    return lambda requested: path if requested == name else None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX shell script as a fake player")
+def test_player_that_fails_after_starting_is_reported(app, tmp_path):
+    import gui as gui_mod
+
+    player = _fake_player(tmp_path, 'echo "Connection failure: Connection refused" >&2\nexit 1\n')
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.shutil, "which", side_effect=_only("paplay", player)):
+        with mock.patch.object(gui_mod.messagebox, "showerror") as mock_error:
+            app.stego_play_button.invoke()
+            deadline = time.time() + 5
+            while not mock_error.called and time.time() < deadline:
+                app.update()
+                time.sleep(0.05)
+
+    assert mock_error.called
+    assert "Connection refused" in mock_error.call_args[0][1]
+    assert app.status_var.get() == "Playback failed: stego_audio_authentic.wav"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX shell script as a fake player")
+def test_playing_a_second_clip_stops_the_first(app, tmp_path):
+    import gui as gui_mod
+
+    player = _fake_player(tmp_path, "sleep 30\n")
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.shutil, "which", side_effect=_only("paplay", player)):
+        app.stego_play_button.invoke()
+        first = app._player_process
+        app.stego_play_button.invoke()
+        second = app._player_process
+
+    assert first.wait(timeout=5) < 0
+    assert second is not first and second.poll() is None
+    second.terminate()
+    second.wait(timeout=5)
+
+
+def test_windows_plays_through_winsound(app):
+    import gui as gui_mod
+
+    fake_winsound = mock.MagicMock(SND_FILENAME=0x20000, SND_ASYNC=0x1, SND_NODEFAULT=0x2)
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.sys, "platform", "win32"), mock.patch.dict(sys.modules, {"winsound": fake_winsound}):
+        app.stego_play_button.invoke()
+
+    played_path, flags = fake_winsound.PlaySound.call_args[0]
+    assert played_path.endswith("stego_audio_authentic.wav")
+    assert flags == 0x20000 | 0x1 | 0x2
+
+
+def test_macos_plays_through_afplay(app):
+    import gui as gui_mod
+
+    _verify(app, SAMPLES / "stego_audio_authentic.wav", PASSPHRASE)
+    with mock.patch.object(gui_mod.sys, "platform", "darwin"), \
+            mock.patch.object(gui_mod.shutil, "which", side_effect=_only("afplay", "/usr/bin/afplay")), \
+            mock.patch.object(gui_mod.subprocess, "Popen") as mock_popen:
+        mock_popen.return_value.poll.return_value = 0
+        mock_popen.return_value.returncode = 0
+        app.stego_play_button.invoke()
+
+    command = mock_popen.call_args[0][0]
+    assert command[0] == "/usr/bin/afplay" and command[1].endswith("stego_audio_authentic.wav")

@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 
 from core import crypto, image_stego
-from core.errors import CapacityError
+from core.errors import CapacityError, UnsupportedFormatError
 from core.verdict import Verdict
 
 KEYS = Path(__file__).resolve().parent.parent / "keys"
@@ -44,26 +44,38 @@ def test_encode_decode_round_trip_authentic(cover_png, tmp_path):
     start = image_stego.encode(cover_png, stego_path, {"meta": {"team": "P1-6"}}, "hunter2", demo_a, num_lsb=2)
     assert start > 0
 
-    verdict, parsed = image_stego.decode(stego_path, "hunter2", trusted)
+    verdict, extracted = image_stego.decode(stego_path, "hunter2", trusted)
     assert verdict == Verdict.AUTHENTIC
-    assert parsed["meta"]["team"] == "P1-6"
+    assert extracted.cover_hash_matches
+    assert extracted.payload["meta"]["team"] == "P1-6"
 
 
-def test_jpeg_cover_accepted_output_always_png(tmp_path):
-    """§2 allows loading a JPEG *cover* (decoded to RGB, re-saved as PNG) - it
-    only forbids saving the *stego output* as JPEG. _save_carrier always
-    writes PNG regardless of out_path's extension, so this is enforced
-    structurally rather than by rejecting JPEG inputs.
-    """
+def test_jpeg_cover_rejected_on_embed_and_verify(tmp_path):
+    """Format is detected from content, so a JPEG renamed to .png is rejected too."""
     demo_a, _ = _keys()
     trusted = {demo_a.key_id: demo_a.public_key}
     img = Image.new("RGB", (128, 128), color=(10, 20, 30))
-    jpeg_path = tmp_path / "cover.jpg"
-    img.save(jpeg_path, format="JPEG", quality=95)
     out_path = tmp_path / "out.png"
+    for name in ("cover.jpg", "disguised_jpeg.png"):
+        path = tmp_path / name
+        img.save(path, format="JPEG", quality=95)
 
-    image_stego.encode(jpeg_path, out_path, {}, "hunter2", demo_a, num_lsb=1)
-    assert Image.open(out_path).format == "PNG"
+        with pytest.raises(UnsupportedFormatError):
+            image_stego.encode(path, out_path, {}, "hunter2", demo_a, num_lsb=1)
+        assert not out_path.exists()
+
+        verdict, _ = image_stego.decode(path, "hunter2", trusted)
+        assert verdict == Verdict.CANNOT_VERIFY
+
+
+def test_bmp_cover_accepted(cover_png, tmp_path):
+    demo_a, _ = _keys()
+    trusted = {demo_a.key_id: demo_a.public_key}
+    bmp_path = tmp_path / "cover.bmp"
+    Image.open(cover_png).save(bmp_path, format="BMP")
+    out_path = tmp_path / "stego.png"
+
+    image_stego.encode(bmp_path, out_path, {}, "hunter2", demo_a, num_lsb=1)
 
     verdict, _ = image_stego.decode(out_path, "hunter2", trusted)
     assert verdict == Verdict.AUTHENTIC
@@ -96,6 +108,6 @@ def test_tampered_pixel_after_embed_is_tampered(cover_png, tmp_path):
     px[0, 0] = (r ^ 0b10000000, g, b)
     img.save(stego_path, format="PNG")
 
-    verdict, parsed = image_stego.decode(stego_path, "hunter2", trusted)
+    verdict, extracted = image_stego.decode(stego_path, "hunter2", trusted)
     assert verdict == Verdict.TAMPERED
-    assert parsed is None
+    assert extracted is not None and not extracted.cover_hash_matches

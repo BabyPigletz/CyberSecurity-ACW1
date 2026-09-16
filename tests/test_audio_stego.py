@@ -52,9 +52,10 @@ def test_encode_decode_round_trip_authentic(cover_wav, tmp_path):
     start = audio_stego.encode(cover_wav, stego_path, {"meta": {"team": "P1-6"}}, "hunter2", demo_a, num_lsb=2)
     assert start > 0
 
-    verdict, parsed = audio_stego.decode(stego_path, "hunter2", trusted)
+    verdict, extracted = audio_stego.decode(stego_path, "hunter2", trusted)
     assert verdict == Verdict.AUTHENTIC
-    assert parsed["meta"]["team"] == "P1-6"
+    assert extracted.cover_hash_matches
+    assert extracted.payload["meta"]["team"] == "P1-6"
 
 
 def test_wrong_passphrase_does_not_verify(cover_wav, tmp_path):
@@ -63,9 +64,9 @@ def test_wrong_passphrase_does_not_verify(cover_wav, tmp_path):
     stego_path = tmp_path / "stego.wav"
     audio_stego.encode(cover_wav, stego_path, {}, "correct-pass", demo_a, num_lsb=2)
 
-    verdict, parsed = audio_stego.decode(stego_path, "wrong-pass", trusted)
+    verdict, extracted = audio_stego.decode(stego_path, "wrong-pass", trusted)
     assert verdict in (Verdict.PAYLOAD_MISSING, Verdict.WRONG_START_LOCATION)
-    assert parsed is None
+    assert extracted is None
 
 
 def test_high_byte_of_16bit_sample_never_touched(cover_wav, tmp_path):
@@ -114,9 +115,9 @@ def test_tampered_carrier_byte_after_embed_is_tampered(cover_wav, tmp_path):
         wf.setparams(params)
         wf.writeframes(bytes(frames))
 
-    verdict, parsed = audio_stego.decode(stego_path, "hunter2", trusted)
+    verdict, extracted = audio_stego.decode(stego_path, "hunter2", trusted)
     assert verdict == Verdict.TAMPERED
-    assert parsed is None
+    assert extracted is not None and not extracted.cover_hash_matches
 
 
 def test_KNOWN_GAP_high_byte_tamper_is_invisible_to_cover_hash(cover_wav, tmp_path):

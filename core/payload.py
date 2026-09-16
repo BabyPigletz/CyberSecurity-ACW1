@@ -24,6 +24,10 @@ MAGIC = b"ACW1"
 VERSION = 0x02
 PREFIX_LEN = 10  # bytes
 PREFIX_CARRIER_LEN = PREFIX_LEN * 8  # always written at 1 bit/carrier-byte
+SIG_LEN_FIELD = 2
+SALT_LEN = 16
+IV_LEN = 12
+GCM_TAG_LEN = 16
 
 
 @dataclass
@@ -34,6 +38,7 @@ class Payload:
     meta: dict
     cover_hash: bytes
     signer_key_id: str
+    message: str = ""
 
 
 @dataclass
@@ -53,6 +58,17 @@ class BodyResult:
     parsed: Optional[dict]
 
 
+@dataclass
+class Extracted:
+    payload: dict
+    embedded_cover_hash: Optional[str]
+    recomputed_cover_hash: str
+
+    @property
+    def cover_hash_matches(self) -> bool:
+        return self.embedded_cover_hash == self.recomputed_cover_hash
+
+
 def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -70,31 +86,54 @@ def parse_prefix_bytes(raw: bytes) -> PrefixInfo:
     )
 
 
+def _plaintext(payload: Payload) -> bytes:
+    fields = {
+        "cover_hash": payload.cover_hash.hex(),
+        "media_id": payload.media_id,
+        "meta": payload.meta,
+        "nonce": payload.nonce,
+        "signer_key_id": payload.signer_key_id,
+        "timestamp": payload.timestamp,
+    }
+    if payload.message:
+        fields["message"] = payload.message
+    return json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def estimate_body_len(message: str, meta: dict, keypair: KeyPair) -> int:
+    """Exact body size for an auto-generated payload, computed without encrypting or signing."""
+    # Every auto-generated field has a fixed width, so a placeholder payload serialises to the same length.
+    placeholder = Payload(
+        media_id=str(uuid.UUID(int=0)),
+        timestamp=_utc_now(),
+        nonce="0" * 32,
+        meta=meta,
+        cover_hash=bytes(32),
+        signer_key_id=keypair.key_id,
+        message=message,
+    )
+    sig_len = keypair.public_key.key_size // 8
+    return SIG_LEN_FIELD + sig_len + SALT_LEN + IV_LEN + len(_plaintext(placeholder)) + GCM_TAG_LEN
+
+
+def max_body_len(carrier_len: int, start: int, num_lsb: int) -> int:
+    """Largest body, in bytes, that fits after the prefix when written from start at num_lsb."""
+    return max(carrier_len - start - PREFIX_CARRIER_LEN, 0) * num_lsb // 8
+
+
 def build_stego_bytes(payload: Payload, passphrase: str, keypair: KeyPair, num_lsb: int) -> "tuple[bytes, bytes]":
     """Assemble (prefix, body) per §4/§5. Returned separately because the
     prefix is always written at 1 LSB while the body is written at num_lsb -
     a single concatenated blob can't express that split.
     """
-    plaintext = json.dumps(
-        {
-            "cover_hash": payload.cover_hash.hex(),
-            "media_id": payload.media_id,
-            "meta": payload.meta,
-            "nonce": payload.nonce,
-            "signer_key_id": payload.signer_key_id,
-            "timestamp": payload.timestamp,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-    random_salt = os.urandom(16)
+    plaintext = _plaintext(payload)
+    random_salt = os.urandom(SALT_LEN)
     aes_key = crypto.derive_aes_key(passphrase, random_salt)
     iv, ciphertext = crypto.encrypt(aes_key, plaintext)
     signed_data = random_salt + iv + ciphertext
     signature = crypto.sign(keypair.private_key, signed_data)
 
-    body = len(signature).to_bytes(2, "big") + signature + random_salt + iv + ciphertext
+    body = len(signature).to_bytes(SIG_LEN_FIELD, "big") + signature + random_salt + iv + ciphertext
     prefix = build_prefix(num_lsb, len(body))
     return prefix, body
 
@@ -157,15 +196,16 @@ def embed(carrier: bytearray, cover_id: str, payload_fields: dict, passphrase: s
         meta=payload_fields.get("meta", {}),
         cover_hash=cover_hash,
         signer_key_id=keypair.key_id,
+        message=payload_fields.get("message", ""),
     )
     prefix, body = build_stego_bytes(payload, passphrase, keypair, num_lsb)
 
-    body_carrier_needed = -(-(len(body) * 8) // num_lsb)
-    total_needed = PREFIX_CARRIER_LEN + body_carrier_needed
-    if start + total_needed > carrier_len:
+    capacity = max_body_len(carrier_len, start, num_lsb)
+    if len(body) > capacity:
         raise CapacityError(
-            f"payload needs {total_needed} carrier bytes from offset {start}, "
-            f"only {carrier_len - start} available (cover too small for this LSB setting)"
+            f"Payload is {len(body):,} bytes (message {len(payload.message.encode('utf-8')):,} bytes), "
+            f"but this cover holds at most {capacity:,} bytes at {num_lsb} LSB from the derived offset "
+            f"{start:,}. Use more LSBs, a larger cover, or a shorter message."
         )
 
     bitstream.write_bits(carrier, start, prefix, num_lsb=1)
@@ -173,7 +213,7 @@ def embed(carrier: bytearray, cover_id: str, payload_fields: dict, passphrase: s
     return start
 
 
-def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tuple[Verdict, Optional[dict]]":
+def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tuple[Verdict, Optional[Extracted]]":
     """Full verify flow: derive start, read prefix/body, gather Evidence, decide."""
     carrier_len = len(carrier)
     if carrier_len < 2:
@@ -209,6 +249,7 @@ def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tupl
     ev.claimed_signer_key_id = body_result.claimed_signer_key_id
     ev.gcm_tag_ok = body_result.gcm_ok
 
+    recomputed = None
     if body_result.gcm_ok and body_result.parsed is not None:
         recomputed = crypto.canonical_hash(bytes(carrier), prefix_derived.num_lsb).hex()
         ev.cover_hash_matches = body_result.cover_hash_hex == recomputed
@@ -216,4 +257,7 @@ def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tupl
         ev.cover_hash_matches = True  # irrelevant - TAMPERED already decided by gcm_tag_ok
 
     verdict = decide(ev)
-    return verdict, (body_result.parsed if verdict == Verdict.AUTHENTIC else None)
+    # The signature is what vouches for this data, so it is never released without a valid one.
+    if recomputed is None or verdict not in (Verdict.AUTHENTIC, Verdict.TAMPERED):
+        return verdict, None
+    return verdict, Extracted(body_result.parsed, body_result.cover_hash_hex, recomputed)

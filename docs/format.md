@@ -35,8 +35,9 @@ carrier byte, immediately following the prefix region.
   transparent pixels is visible, and some tools normalise it.
 - Carrier sequence = raw pixel bytes in row-major order: `R0,G0,B0,R1,G1,B1,...`
 - `C = width * height * 3`
-- Reject JPEG on the embed path; lossy recompression destroys LSB data. Loading a JPEG
-  cover and saving the stego as PNG is fine. Saving stego as JPEG is not.
+- Cover must be PNG or BMP (lossless), detected from file content rather than extension.
+  JPEG is rejected outright: at embed time with an error, at verify time as
+  `CANNOT_VERIFY`. Stego output is always written as PNG.
 
 ### WAV / PCM (audio)
 
@@ -51,7 +52,9 @@ carrier byte, immediately following the prefix region.
 ### Sample media sizing
 
 The large-payload case (the Project Overview paragraph, ~900 chars) produces a body of
-roughly 1.2 KB after encryption and signing. With the half-capacity rule in §7, choose:
+about 1.5 KB after encryption and signing (measured: 1,526 bytes for a 921-character
+message). Body size is 588 bytes for a metadata-only payload plus the message's quoted JSON
+length and 11 bytes for the `,"message":` key. With the half-capacity rule in §7, choose:
 - image: **at least 512x512** (C = 786,432; ample at 1 LSB)
 - audio: **at least 5 seconds, 16-bit, 44.1 kHz** (C >= 220,500)
 
@@ -107,12 +110,14 @@ Written at `num_lsb` bits per carrier byte, starting at carrier index `start + 8
 
 `sig_len` is present so the RSA key size is not baked into the format.
 
-Plaintext before encryption is UTF-8 JSON, compact separators, **sorted keys**:
+Plaintext before encryption is UTF-8 JSON, compact separators, **sorted keys**, with
+non-ASCII characters written as raw UTF-8 rather than `\u` escapes:
 
 ```json
 {
   "cover_hash": "<hex sha256, see §8>",
   "media_id": "<uuid4>",
+  "message": "<user-supplied text; key omitted entirely when the message is empty>",
   "meta": {"course": "INF2005", "team": "P?-?"},
   "nonce": "<hex, 16 random bytes>",
   "signer_key_id": "<hex, see below>",

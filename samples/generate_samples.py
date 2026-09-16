@@ -9,7 +9,10 @@ project's decision to keep demo-fixture provenance auditable.
 PASSPHRASE USED FOR ALL "authentic" SAMPLES BELOW: see samples/README.md.
 """
 
+import os
 import sys
+import time
+import uuid
 import wave
 from pathlib import Path
 
@@ -25,6 +28,8 @@ SAMPLES_DIR = REPO_ROOT / "samples"
 KEYS_DIR = REPO_ROOT / "keys"
 PASSPHRASE = "INF2005-P1-6-demo"
 NUM_LSB = 2
+# Learning Outcome 1 from the assignment spec, verbatim. Every stego fixture carries it.
+MESSAGE = "Explain how steganography can be used to embed hidden verification data in image and audio cover objects."
 
 
 def make_cover_image() -> Path:
@@ -64,7 +69,7 @@ def make_cover_audio() -> Path:
 def main():
     SAMPLES_DIR.mkdir(exist_ok=True)
     demo_a = crypto.load_keypair(KEYS_DIR / "demo_a_pub.pem", KEYS_DIR / "demo_a_priv.pem")
-    fields = {"meta": {"course": "INF2005", "team": "P1-6"}}
+    fields = {"meta": {"course": "INF2005", "team": "P1-6"}, "message": MESSAGE}
 
     cover_png = make_cover_image()
     cover_wav = make_cover_audio()
@@ -116,21 +121,31 @@ def main():
 
     # --- Extra: WRONG_START_LOCATION fixture (not one of the 5 demo cases, ---
     # --- but one of the 6 verdicts, and explicitly requested this session) ---
-    # A stray, well-formed prefix planted at carrier offset 0, with no real
-    # payload at the (different) passphrase-derived offset. This simulates
-    # "someone else's non-compliant embed happened to leave a magic marker at
-    # offset 0" - the one situation §9 distinguishes from a plain, untouched
-    # cover (PAYLOAD_MISSING). It is NOT producible through the normal GUI
-    # embed flow (which always writes at the derived offset, never at 0), so
-    # it has to be built directly with bitstream.write_bits here. The prefix's
-    # body_len (999) is arbitrary and never read, since decode() returns
-    # WRONG_START_LOCATION as soon as it sees magic at 0 but not at the
-    # derived offset - it never attempts to parse a body that isn't there.
+    # A complete, genuinely signed and encrypted payload (message included)
+    # written at carrier offset 0, with nothing at the passphrase-derived
+    # offset. This simulates a non-compliant tool that embedded from the first
+    # byte - the one situation §9 distinguishes from a plain, untouched cover
+    # (PAYLOAD_MISSING). The normal embed flow always writes at the derived
+    # offset and never at 0, so the payload is assembled and written directly
+    # here. decode() reports WRONG_START_LOCATION as soon as it sees magic at 0
+    # but not at the derived offset; it deliberately never reads a payload
+    # from anywhere other than the derived offset.
     wrong_location_path = SAMPLES_DIR / "stego_image_wrong_start_location.png"
     carrier, meta = image_stego._load_carrier(cover_png)
-    bitstream.write_bits(carrier, 0, payload_mod.build_prefix(1, 999), num_lsb=1)
+    stray_payload = payload_mod.Payload(
+        media_id=str(uuid.uuid4()),
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        nonce=os.urandom(16).hex(),
+        meta=fields["meta"],
+        cover_hash=crypto.canonical_hash(bytes(carrier), NUM_LSB),
+        signer_key_id=demo_a.key_id,
+        message=MESSAGE,
+    )
+    prefix, body = payload_mod.build_stego_bytes(stray_payload, PASSPHRASE, demo_a, NUM_LSB)
+    bitstream.write_bits(carrier, 0, prefix, num_lsb=1)
+    bitstream.write_bits(carrier, payload_mod.PREFIX_CARRIER_LEN, body, num_lsb=NUM_LSB)
     image_stego._save_carrier(wrong_location_path, carrier, meta)
-    print(f"wrote {wrong_location_path} (doctored: stray magic planted at offset 0)")
+    print(f"wrote {wrong_location_path} (doctored: full payload written at offset 0)")
 
     print("\nDone. See samples/README.md for passphrases and expected verdicts.")
 

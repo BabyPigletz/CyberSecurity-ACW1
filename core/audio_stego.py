@@ -30,6 +30,12 @@ def capacity_bytes(path: Path, num_lsb: int = 1) -> int:
     return bitstream.capacity_bytes(_carrier_len(raw_len, sampwidth), num_lsb)
 
 
+def carrier_len(path: Path) -> int:
+    with wave.open(str(path), "rb") as wf:
+        sampwidth = wf.getsampwidth()
+        return _carrier_len(wf.getnframes() * wf.getnchannels() * sampwidth, sampwidth)
+
+
 def _load_carrier(path: Path):
     with wave.open(str(path), "rb") as wf:
         n_channels = wf.getnchannels()
@@ -86,7 +92,7 @@ def encode(in_path: Path, out_path: Path, payload_fields: dict, passphrase: str,
 
 def decode(path: Path, passphrase: str, trusted_keys: dict):
     """Extract and verify. Never raises for expected failure modes - always
-    returns (Verdict, payload_dict_or_None).
+    returns (Verdict, payload.Extracted or None).
     """
     try:
         carrier, meta = _load_carrier(path)
