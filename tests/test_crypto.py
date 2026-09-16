@@ -28,6 +28,14 @@ def test_aes_key_differs_by_random_salt_same_passphrase():
     assert a != b
 
 
+def test_offset_and_aes_keys_are_domain_separated():
+    salt = os.urandom(16)
+    offset_key = crypto.derive_offset_key("same passphrase")
+    aes_key = crypto.derive_aes_key("same passphrase", salt)
+    assert offset_key != aes_key
+    assert len(offset_key) == len(aes_key) == 32
+
+
 def test_encrypt_decrypt_round_trip():
     key = crypto.derive_aes_key("pw", os.urandom(16))
     iv, ct = crypto.encrypt(key, b"hello world")

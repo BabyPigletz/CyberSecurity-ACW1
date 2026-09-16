@@ -39,6 +39,15 @@ pytest
 PNG/WAV and one sample per verdict) if you ever need to regenerate them;
 `samples/README.md` documents the passphrase and expected verdict for each.
 
+The GUI also includes an innovation evaluation framework. **Run Attack
+Simulation** creates safe copies of the current stego object with visible-carrier
+tampering, hidden-payload corruption, wrong-passphrase, untrusted-key, and
+replay/substitution cases. It reports a weighted detection score and, for WAV,
+also reports changed samples, mean absolute error, and signal-to-noise ratio.
+**Compare Steganalysis** compares matching cover/stego windows at multiple
+scales and reports cross-scale agreement. Attack artifacts are written to a
+folder selected in the GUI; the original stego object is never changed.
+
 ## What it does
 
 Given a cover PNG or WAV and a passphrase, the tool derives a start location
@@ -65,6 +74,9 @@ Three independent mechanisms, each protecting something different:
   integrity independently of the payload (`TAMPERED` if the visible pixels/
   samples changed since signing, even though the payload itself decrypts and
   verifies fine).
+- **HKDF key separation** derives independent offset and AES subkeys using
+  distinct context labels. A passphrase-derived location key cannot be reused
+  as an encryption key, even though both are derived from the same passphrase.
 
 **What none of this protects against:** a leaked or guessed passphrase
 (everything downstream — offset, AES key, HMAC key — derives from it, so it
@@ -179,7 +191,21 @@ regions whose byte-value pairs look artificially randomized, which is what
 LSB-replacement produces. Verified against a constructed buffer (a
 structured region directly adjacent to genuine random bytes) where the
 windowed p-value transitions sharply and exactly at the boundary — see
-`tests/test_steganalysis.py`.
+`tests/test_steganalysis.py`. The multi-scale extension repeats the paired
+comparison at 512, 1024, and 2048-byte windows and reports how many scales
+agree before presenting a suspicious-region assessment.
+
+`core/attack_simulation.py` also tests replay resistance by transplanting a
+valid encrypted payload into a different cover. The embedded cover hash then
+fails against the new carrier and produces `TAMPERED`, demonstrating that a
+valid signed payload cannot simply be reused with another media object.
+
+The paired analysis extension compares the original cover and stego windows,
+requiring both a high stego p-value and a meaningful increase over the cover's
+p-value before marking a region suspicious. This is statistical evidence, not
+proof of hidden data or tampering. `core/attack_simulation.py` provides the
+companion reproducible security test matrix used by the GUI and automated
+tests.
 
 **Caveat found while testing this:** `docs/format.md` §11's demo claim
 ("flags your own 8-LSB output while missing your 1-LSB output") could not be
