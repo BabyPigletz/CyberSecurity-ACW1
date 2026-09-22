@@ -24,12 +24,14 @@ from tkinter import filedialog, messagebox
 
 from PIL import Image, ImageTk
 
-from core import attack_simulation, audio_stego, crypto, image_stego, steganalysis, video_stego
-
-VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov")
+from core import crypto, video_stego
 from core import payload as payload_mod
 from core.errors import CapacityError, UnsupportedFormatError
+from eval import attack_simulation, steganalysis
+from media import audio_stego, image_stego
 from core.verdict import Verdict
+
+VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov")
 
 KEYS_DIR = Path(__file__).resolve().parent / "keys"
 PAYLOAD_META = {"course": "INF2005", "team": "P1-6"}
@@ -613,6 +615,7 @@ class ACW1(tk.Tk):
         candidates = ("afplay",) if sys.platform == "darwin" else ("paplay", "pw-play", "aplay")
         player = next(filter(None, map(shutil.which, candidates)), None)
         if not player:
+            self.status_var.set(f"Playback unavailable for {path.name}")
             messagebox.showinfo(
                 "Playback unavailable",
                 f"No audio player found (looked for {', '.join(candidates)}). "

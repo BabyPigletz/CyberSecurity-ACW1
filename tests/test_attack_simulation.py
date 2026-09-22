@@ -4,7 +4,9 @@ from pathlib import Path
 
 from PIL import Image
 
-from core import attack_simulation, audio_metrics, audio_stego, bitstream, crypto, image_stego, payload
+from core import bitstream, crypto, payload
+from eval import attack_simulation, audio_metrics
+from media import audio_stego, image_stego
 from core.verdict import Verdict
 
 KEYS = Path(__file__).resolve().parent.parent / "keys"

@@ -20,10 +20,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
+from media import audio_stego, image_stego
+
 from PIL import Image
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from core import audio_stego, bitstream, crypto, image_stego, video_stego, payload as payload_mod
+from core import bitstream, crypto, payload as payload_mod, video_stego
 
 SAMPLES_DIR = REPO_ROOT / "samples"
 KEYS_DIR = REPO_ROOT / "keys"

@@ -5,8 +5,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
-from core import crypto, image_stego
+from core import crypto
 from core.errors import CapacityError, UnsupportedFormatError
+from media import image_stego
 from core.verdict import Verdict
 
 KEYS = Path(__file__).resolve().parent.parent / "keys"

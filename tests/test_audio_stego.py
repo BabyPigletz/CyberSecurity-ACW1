@@ -3,8 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from core import audio_stego, crypto
+from core import crypto
 from core.errors import CapacityError
+from media import audio_stego
 from core.verdict import Verdict
 
 KEYS = Path(__file__).resolve().parent.parent / "keys"
@@ -150,3 +151,37 @@ def test_KNOWN_GAP_high_byte_tamper_is_invisible_to_cover_hash(cover_wav, tmp_pa
         "if this now fails, canonical_hash's scope has been widened to cover "
         "high bytes too - update this test and the limitation note in README.md"
     )
+
+def test_dsss_audio_encode_decode_round_trip(tmp_path):
+    """Tests DSSS spread spectrum embedding and extraction on audio."""
+    demo_a = _keys()
+    trusted = {demo_a.key_id: demo_a.public_key}
+    
+    # Generate WAV with 300,000 frames to accommodate 279,040 DSSS samples
+    cover_wav = tmp_path / "large_cover.wav"
+    _make_wav(cover_wav, n_frames=300000)
+    
+    stego_path = tmp_path / "stego_dsss.wav"
+
+    # 1. Encode via DSSS
+    status = audio_stego.encode_dsss(
+        cover_wav, 
+        stego_path, 
+        {"message": "DSSS resilient payload"}, 
+        "hunter2", 
+        demo_a, 
+        chip_length=64  # Smaller chip length for faster unit test execution
+    )
+    assert stego_path.exists()
+
+    # 2. Decode via DSSS
+    verdict, extracted = audio_stego.decode_dsss(
+        stego_path, 
+        "hunter2", 
+        trusted, 
+        chip_length=64
+    )
+
+    # 3. Assertions
+    assert verdict == Verdict.AUTHENTIC
+    assert extracted.payload["message"] == "DSSS resilient payload"

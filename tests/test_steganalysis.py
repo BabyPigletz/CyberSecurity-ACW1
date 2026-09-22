@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
 
-from core import crypto, image_stego, steganalysis
+from core import crypto
+from eval import steganalysis
+from media import image_stego
 
 KEYS = Path(__file__).resolve().parent.parent / "keys"
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"

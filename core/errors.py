@@ -11,3 +11,7 @@ class CapacityError(Exception):
 
 class UnsupportedFormatError(Exception):
     """Raised when a cover file's format is not supported for embedding."""
+
+
+class ECCError(Exception):
+    """Raised when Reed-Solomon error correction cannot recover payload data."""

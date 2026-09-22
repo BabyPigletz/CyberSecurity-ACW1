@@ -28,6 +28,7 @@ def _display_available():
         import tkinter as tk
 
         root = tk.Tk()
+        root.tk.call("package", "require", "Ttk")
         root.destroy()
         return True
     except Exception:
@@ -257,6 +258,7 @@ def test_oversized_payload_rejected_via_embed_button(app, tmp_path):
     assert not out_path.exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows uses built-in winsound playback")
 def test_play_button_degrades_gracefully_without_a_system_player(app):
     """Confirms the playback code path doesn't crash when no audio player
     binary is present (true in this dev sandbox - see the final report's

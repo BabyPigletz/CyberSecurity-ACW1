@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from core import audio_stego, bitstream, crypto, image_stego, location
+from core import bitstream, crypto, location
 from core import payload as payload_mod
+from media import audio_stego, image_stego
 from core.verdict import Verdict
 
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
