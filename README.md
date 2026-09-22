@@ -4,7 +4,7 @@ INF2005 assignment (Lab P1, Group 6). A Tkinter GUI that embeds a signed,
 encrypted verification payload into a PNG or WAV cover object using
 LSB-replacement steganography (1–8 bits, selectable), then extracts and
 verifies it, reporting one of six verdicts. Video cover objects (`.mp4`,
-`.mkv`, `.avi`, `.mov`) are also supported as an optional innovation (§8) —
+`.mkv`, `.avi`, `.mov`) are also supported as an optional innovation —
 see "Video cover objects" below.
 
 Byte-level format, cryptographic parameters, and module interfaces are
@@ -33,7 +33,7 @@ silently.
 
 Demo keypairs live under `keys/` (`demo_a`: full pair; `demo_b`: public key
 only, used to produce the wrong-key negative case). Do not treat either as a
-real secret — see `docs/format.md` §6.
+real secret — see `docs/format.md`.
 
 Audio playback uses the operating system's own player, so no extra Python
 package is needed: `winsound` on Windows and `afplay` on macOS are built in;
@@ -94,7 +94,7 @@ Three independent mechanisms, each protecting something different:
 - **RSA-PSS signing** protects *authenticity and origin* — proof the payload
   was produced by the holder of a specific private key (`SIGNATURE_INVALID`
   if not, or if signed but the plaintext's claimed signer doesn't match the
-  key that actually verified — see §5's `signer_key_id`).
+  key that actually verified — see `signer_key_id`).
 - **SHA-256 over a masked cover representation** protects the *carrier's*
   integrity independently of the payload (`TAMPERED` if the visible pixels/
   samples changed since signing, even though the payload itself decrypts and
@@ -145,11 +145,11 @@ circular.
 
 The honest limitation: tampering confined entirely to the masked-off low bits
 is invisible to this hash. That's a real gap, not an edge case we're ignoring
-— it's called out in `docs/format.md` §8 and worth stating plainly in the
+— it's called out in `docs/format.md` and worth stating plainly in the
 write-up.
 
 **This gap is much larger for audio than for images.** For 16-bit PCM WAV,
-§2 defines the carrier as the *low byte only* of each sample — so the cover
+defines the carrier as the *low byte only* of each sample — so the cover
 hash never sees the high byte at all, not just its low `num_lsb` bits. The
 high byte is the dominant, audible half of the sample: an attacker can
 substantially alter the audio's actual sound by rewriting every high byte and
@@ -169,8 +169,7 @@ not applied here; flagged as a limitation rather than fixed.
 
 The signature covers the ciphertext, not the plaintext, so a verifier can
 reject a forged or corrupted signature *before* spending effort decrypting —
-`SIGNATURE_INVALID` and `TAMPERED` stay cleanly separated (§9 explains why
-that separation matters for criterion 4).
+`SIGNATURE_INVALID` and `TAMPERED` stay cleanly separated.
 
 Encrypt-then-sign has a known weakness: if a verifier is ever willing to trust
 more than one public key, an attacker holding a second trusted keypair can
@@ -196,7 +195,7 @@ extended to multiple signers later.
 | `WRONG_START_LOCATION` | Magic marker not found at the derived offset, but present at offset 0 — this stego object doesn't match this passphrase. |
 | `CANNOT_VERIFY` | File unreadable, unsupported format, or an internal field (version, declared length) doesn't make sense — verification can't even be attempted. |
 
-Full precedence rules: `docs/format.md` §9.
+Full precedence rules: `docs/format.md`.
 
 **A nuance found during implementation:** because the RSA-PSS signature
 covers the entire `salt || iv || ciphertext` range, any tamper severe enough
@@ -232,7 +231,7 @@ proof of hidden data or tampering. `core/attack_simulation.py` provides the
 companion reproducible security test matrix used by the GUI and automated
 tests.
 
-## Video cover objects (innovation component, §8)
+## Video cover objects (innovation component)
 
 `core/video_stego.py` embeds into a video's *audio track only* — frames are
 stream-copied untouched via ffmpeg's `-c:v copy`, never re-encoded, never
@@ -259,7 +258,7 @@ demonstrates this concretely.
 ## Known limitations
 
 - **Halved effective capacity.** The derived offset lands in the first half of
-  the carrier space (§7) so a prefix-plus-body always fits regardless of
+  the carrier space so a prefix-plus-body always fits regardless of
   where the offset falls — real usable capacity per cover is roughly half the
   naive `C * num_lsb / 8` figure.
 - **LSB fragility.** Any recompression (saving stego output as JPEG) or
