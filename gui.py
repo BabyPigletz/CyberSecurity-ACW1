@@ -5,7 +5,7 @@ Wires the LSB-replacement embed/extract pipeline in core/ to a GUI that can
 load an image or WAV cover, embed a signed and encrypted payload (optionally
 carrying a user-typed message) at a passphrase-derived (never user-chosen)
 start location, and verify a file - own output or an externally supplied
-sample - producing one of the six verdicts in docs/format.md §9.
+sample - producing one of the six verdicts in docs/format.md.
 
 Signing always uses the committed demo_a keypair; verification always trusts
 demo_a's public key only (the assignment's default single-trusted-key model -
@@ -13,6 +13,7 @@ see README.md "Why encrypt-then-sign"). There is deliberately no key picker.
 """
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -23,12 +24,14 @@ from tkinter import filedialog, messagebox
 
 from PIL import Image, ImageTk
 
-from core import crypto
+from core import crypto, video_stego
 from core import payload as payload_mod
 from core.errors import CapacityError, UnsupportedFormatError
 from eval import attack_simulation, steganalysis
 from media import audio_stego, image_stego
 from core.verdict import Verdict
+
+VIDEO_EXTENSIONS = (".mp4", ".mkv", ".avi", ".mov")
 
 KEYS_DIR = Path(__file__).resolve().parent / "keys"
 PAYLOAD_META = {"course": "INF2005", "team": "P1-6"}
@@ -57,7 +60,7 @@ class ACW1(tk.Tk):
         self.cover_path: "Path | None" = None
         self.cover_carrier_len: "int | None" = None
         self.stego_path: "Path | None" = None
-        self.active_kind: "str | None" = None  # "image" | "audio" - of whichever panel was last populated
+        self.active_kind: "str | None" = None  # "image" | "audio" | "video" - of whichever panel was last populated
         self._player_process: "subprocess.Popen | None" = None
 
         self._signer_keypair = crypto.load_keypair(KEYS_DIR / "demo_a_pub.pem", KEYS_DIR / "demo_a_priv.pem")
@@ -200,24 +203,36 @@ class ACW1(tk.Tk):
         )
         message_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
+    @staticmethod
+    def _kind_for_path(path: Path) -> str:
+        suffix = path.suffix.lower()
+        if suffix == ".wav":
+            return "audio"
+        if suffix in VIDEO_EXTENSIONS:
+            return "video"
+        return "image"
+
     ## Cover loading
     def load_cover(self):
         path = filedialog.askopenfilename(
             title="Select Cover Object",
-            filetypes=[("Cover files", "*.png *.bmp *.wav")],
+            filetypes=[("Cover files", "*.png *.bmp *.wav *.mp4 *.mkv *.avi *.mov")],
         )
         if not path:
             return
         path = Path(path)
-        kind = "audio" if path.suffix.lower() == ".wav" else "image"
+        kind = self._kind_for_path(path)
 
         try:
             if kind == "image":
                 self._populate_image_panel("cover", path)
                 carrier_len = image_stego.carrier_len(path)
-            else:
+            elif kind == "audio":
                 self._populate_audio_panel("cover", path)
                 carrier_len = audio_stego.carrier_len(path)
+            else:
+                self._populate_video_panel("cover", path)
+                carrier_len = video_stego.carrier_len(path)
         except Exception as exc:
             messagebox.showerror("Error loading cover", f"Could not open cover:\n{exc}")
             return
@@ -247,7 +262,7 @@ class ACW1(tk.Tk):
         getattr(self, f"{role}_info_label").config(
             text=f"{img.size[0]} x {img.size[1]} {img.format}\n{carrier_len:,} carrier bytes"
         )
-        getattr(self, f"{role}_play_button").config(state=tk.DISABLED)
+        getattr(self, f"{role}_play_button").config(text="Play Audio", state=tk.DISABLED)
 
     def _populate_audio_panel(self, role: str, path: Path):
         with wave.open(str(path), "rb") as wf:
@@ -262,14 +277,34 @@ class ACW1(tk.Tk):
         )
         label.image = None
         getattr(self, f"{role}_info_label").config(text=f"{audio_stego.carrier_len(path):,} carrier bytes")
-        getattr(self, f"{role}_play_button").config(state=tk.NORMAL, command=lambda: self._play_audio(path))
+        getattr(self, f"{role}_play_button").config(
+            text="Play Audio", state=tk.NORMAL, command=lambda: self._play_audio(path)
+        )
+
+    def _populate_video_panel(self, role: str, path: Path):
+        label = getattr(self, f"{role}_image_label")
+        try:
+            carrier = video_stego.carrier_len(path)
+            info = f"VIDEO\n{path.suffix.lstrip('.').upper()}\n{carrier:,} carrier bytes (audio track)"
+        except Exception as exc:
+            # Surface why (e.g. no audio track, ffmpeg missing) rather than a blank label -
+            # this is the same failure a marker's machine could hit without ffmpeg installed.
+            info = f"VIDEO\n(capacity unavailable: {exc})"
+        label.config(image="", text=info)
+        label.image = None
+        getattr(self, f"{role}_info_label").config(
+            text="Video frames are copied untouched; only the audio track is verified."
+        )
+        getattr(self, f"{role}_play_button").config(
+            text="Play Video", state=tk.NORMAL, command=lambda: self._play_video(path)
+        )
 
     def _clear_preview_panel(self, role: str):
         label = getattr(self, f"{role}_image_label")
         label.config(image="", text="No file loaded")
         label.image = None
         getattr(self, f"{role}_info_label").config(text="")
-        getattr(self, f"{role}_play_button").config(state=tk.DISABLED)
+        getattr(self, f"{role}_play_button").config(text="Play Audio", state=tk.DISABLED)
         if role == "stego":
             self.verdict_var.set("—")
             self.verdict_label.config(fg="black")
@@ -332,9 +367,17 @@ class ACW1(tk.Tk):
             out_path = filedialog.asksaveasfilename(
                 title="Save Stego Image As", defaultextension=".png", filetypes=[("PNG image", "*.png")]
             )
-        else:
+        elif self.active_kind == "audio":
             out_path = filedialog.asksaveasfilename(
                 title="Save Stego Audio As", defaultextension=".wav", filetypes=[("WAV audio", "*.wav")]
+            )
+        else:
+            # .mkv, not .mp4: the remux needs a container that can carry PCM
+            # audio without re-encoding it (see video_stego docstring) - an
+            # .mp4 here would silently corrupt the embedded payload.
+            out_path = filedialog.asksaveasfilename(
+                title="Save Stego Video As", defaultextension=".mkv",
+                filetypes=[("Matroska video", "*.mkv"), ("AVI video", "*.avi")],
             )
         if not out_path:
             return
@@ -346,8 +389,12 @@ class ACW1(tk.Tk):
                 start = image_stego.encode(
                     self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair, num_lsb
                 )
-            else:
+            elif self.active_kind == "audio":
                 start = audio_stego.encode(
+                    self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair, num_lsb
+                )
+            else:
+                start = video_stego.encode(
                     self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair, num_lsb
                 )
         except CapacityError as exc:
@@ -361,8 +408,10 @@ class ACW1(tk.Tk):
         try:
             if self.active_kind == "image":
                 self._populate_image_panel("stego", out_path)
-            else:
+            elif self.active_kind == "audio":
                 self._populate_audio_panel("stego", out_path)
+            else:
+                self._populate_video_panel("stego", out_path)
         except Exception as exc:
             messagebox.showerror("Error loading stego preview", str(exc))
             return
@@ -374,19 +423,24 @@ class ACW1(tk.Tk):
     def verify_file(self):
         path = filedialog.askopenfilename(
             title="Select File to Verify",
-            filetypes=[("Cover/stego files", "*.png *.bmp *.wav"), ("All files", "*.*")],
+            filetypes=[
+                ("Cover/stego files", "*.png *.bmp *.wav *.mp4 *.mkv *.avi *.mov"),
+                ("All files", "*.*"),
+            ],
         )
         if not path:
             return
         path = Path(path)
         passphrase = self.passphrase_var.get()
-        kind = "audio" if path.suffix.lower() == ".wav" else "image"
+        kind = self._kind_for_path(path)
 
         try:
             if kind == "image":
                 verdict, extracted = image_stego.decode(path, passphrase, self._trusted_keys)
-            else:
+            elif kind == "audio":
                 verdict, extracted = audio_stego.decode(path, passphrase, self._trusted_keys)
+            else:
+                verdict, extracted = video_stego.decode(path, passphrase, self._trusted_keys)
         except Exception as exc:
             messagebox.showerror("Verify failed", str(exc))
             return
@@ -395,8 +449,10 @@ class ACW1(tk.Tk):
         try:
             if kind == "image":
                 self._populate_image_panel("stego", path)
-            else:
+            elif kind == "audio":
                 self._populate_audio_panel("stego", path)
+            else:
+                self._populate_video_panel("stego", path)
         except Exception:
             pass  # preview is best-effort; the verdict below is what matters
         self.stego_path = path
@@ -443,7 +499,7 @@ class ACW1(tk.Tk):
     ## Innovation demonstrations
     def run_attack_simulation(self):
         if self.stego_path is None or self.active_kind is None:
-            messagebox.showwarning("No stego object", "Embed or verify a stego image/audio file first.")
+            messagebox.showwarning("No stego object", "Embed or verify a stego image/audio/video file first.")
             return
         passphrase = self.passphrase_var.get()
         if not passphrase:
@@ -485,6 +541,12 @@ class ACW1(tk.Tk):
                 f"\nMaximum sample difference: {quality.maximum_absolute_error}"
                 f"\nSNR: {quality.signal_to_noise_db:.2f} dB"
             )
+        elif self.active_kind in ("audio", "video"):
+            report += (
+                "\n\nAudio quality after embedding: unavailable - the loaded cover "
+                "and stego files don't appear to come from the same original "
+                "(different duration/channels/rate). The 5 cases above are unaffected."
+            )
         self._set_text(self.payload_text, report)
         self.status_var.set(
             f"Attack simulation completed: {score.earned_points}/{score.total_points} points"
@@ -498,9 +560,12 @@ class ACW1(tk.Tk):
             if self.active_kind == "image":
                 cover, _ = image_stego._load_carrier(self.cover_path)
                 stego, _ = image_stego._load_carrier(self.stego_path)
-            else:
+            elif self.active_kind == "audio":
                 cover, _ = audio_stego._load_carrier(self.cover_path)
                 stego, _ = audio_stego._load_carrier(self.stego_path)
+            else:
+                cover, _ = video_stego._load_carrier(self.cover_path)
+                stego, _ = video_stego._load_carrier(self.stego_path)
             result = steganalysis.compare_multiscale(bytes(cover), bytes(stego))
         except Exception as exc:
             messagebox.showerror("Steganalysis failed", str(exc))
@@ -516,6 +581,19 @@ class ACW1(tk.Tk):
         )
         self._set_text(self.payload_text, report)
         self.status_var.set("Paired steganalysis completed")
+
+    ## Video playback (hands off to the OS's default video player - no in-app
+    ## preview, since embedding video playback in Tk is out of scope here)
+    def _play_video(self, path: Path):
+        try:
+            if sys.platform == "win32":
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except OSError as exc:
+            messagebox.showerror("Playback failed", str(exc))
 
     ## Audio playback
     def _play_audio(self, path: Path):

@@ -3,7 +3,9 @@
 INF2005 assignment (Lab P1, Group 6). A Tkinter GUI that embeds a signed,
 encrypted verification payload into a PNG or WAV cover object using
 LSB-replacement steganography (1–8 bits, selectable), then extracts and
-verifies it, reporting one of six verdicts.
+verifies it, reporting one of six verdicts. Video cover objects (`.mp4`,
+`.mkv`, `.avi`, `.mov`) are also supported as an optional innovation —
+see "Video cover objects" below.
 
 Byte-level format, cryptographic parameters, and module interfaces are
 specified in [`docs/format.md`](docs/format.md) — that document is authoritative;
@@ -16,19 +18,34 @@ pip install -r requirements.txt
 python main.py
 ```
 
+**Video cover objects require `ffmpeg` and `ffprobe` on PATH.** Image and
+audio cover objects do not need this - only skip it if you're not using
+video. Install with:
+- Windows: `winget install ffmpeg`, or download from
+  [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) and add its `bin` folder to PATH
+- macOS: `brew install ffmpeg`
+- Linux/WSL: `sudo apt install ffmpeg`
+
+Verify with `ffmpeg -version` and `ffprobe -version` in a **new** terminal
+(PATH changes need a fresh shell). Without this, `core/video_stego.py`
+raises `UnsupportedFormatError` with a clear message rather than failing
+silently.
+
 Demo keypairs live under `keys/` (`demo_a`: full pair; `demo_b`: public key
 only, used to produce the wrong-key negative case). Do not treat either as a
-real secret — see `docs/format.md` §6.
+real secret — see `docs/format.md`.
 
 Audio playback uses the operating system's own player, so no extra Python
 package is needed: `winsound` on Windows and `afplay` on macOS are built in;
 on Linux the app uses `paplay`, `pw-play` or `aplay`, whichever is installed.
 On Ubuntu or WSL, install one with `sudo apt install pulseaudio-utils` (WSLg
-already provides the PulseAudio server it talks to).
+already provides the PulseAudio server it talks to). Video playback instead
+hands off to the OS's default video player/application association (no
+in-GUI preview) - the same "Play Audio"/"Play Video" button relabels itself
+depending on which cover type is loaded.
 
-To run the test suite (132 tests, all against synthetic data or the fixtures
-in `samples/` — no real image/audio hardware needed except for actually
-*hearing* playback, which the tests don't attempt):
+To run the test suite (all tests use synthetic data or fixtures in `samples/`;
+hardware playback is not required):
 
 ```
 pip install -r requirements-dev.txt
@@ -36,17 +53,24 @@ pytest
 ```
 
 `samples/generate_samples.py` rebuilds the fixtures under `samples/` (a cover
-PNG/WAV and one sample per verdict) if you ever need to regenerate them;
-`samples/README.md` documents the passphrase and expected verdict for each.
+PNG/WAV/video and one sample per verdict, plus the video-specific tamper and
+limitation-demo fixtures) if you ever need to regenerate them; `samples/README.md`
+documents the passphrase and expected verdict for each.
 
-The GUI also includes an innovation evaluation framework. **Run Attack
-Simulation** creates safe copies of the current stego object with visible-carrier
-tampering, hidden-payload corruption, wrong-passphrase, untrusted-key, and
-replay/substitution cases. It reports a weighted detection score and, for WAV,
-also reports changed samples, mean absolute error, and signal-to-noise ratio.
+The GUI also includes an innovation evaluation framework, covering image,
+audio, and video cover objects alike. **Run Attack Simulation** creates safe
+copies of the current stego object with visible-carrier tampering,
+hidden-payload corruption, wrong-passphrase, untrusted-key, and
+replay/substitution cases. It reports a weighted detection score and, for
+WAV and video, also reports changed samples, mean absolute error, and
+signal-to-noise ratio (video's numbers are measured on its extracted audio
+track). If the loaded cover and stego don't actually correspond to the same
+original, the 5 security cases still run normally and only the audio-quality
+panel is omitted, rather than the whole simulation failing.
 **Compare Steganalysis** compares matching cover/stego windows at multiple
-scales and reports cross-scale agreement. Attack artifacts are written to a
-folder selected in the GUI; the original stego object is never changed.
+scales and reports cross-scale agreement (also via the extracted audio track
+for video). Attack artifacts are written to a folder selected in the GUI;
+the original stego object is never changed.
 
 ### DSSS audio support
 
@@ -63,8 +87,8 @@ and the focused DSSS round-trip test passes successfully.
 
 ## What it does
 
-Given a cover PNG or WAV and a passphrase, the tool derives a start location
-inside the file, encrypts and signs a JSON payload (an optional message you
+Given a cover PNG, WAV, or video and a passphrase, the tool derives a start
+location inside the file (inside its extracted audio track, for video), encrypts and signs a JSON payload (an optional message you
 type in, plus media ID, timestamp, nonce, team metadata, a hash of the cover,
 and the signer's key id), and writes
 it into the low bits of the cover starting at that location. Extraction
@@ -82,7 +106,7 @@ Three independent mechanisms, each protecting something different:
 - **RSA-PSS signing** protects *authenticity and origin* — proof the payload
   was produced by the holder of a specific private key (`SIGNATURE_INVALID`
   if not, or if signed but the plaintext's claimed signer doesn't match the
-  key that actually verified — see §5's `signer_key_id`).
+  key that actually verified — see `signer_key_id`).
 - **SHA-256 over a masked cover representation** protects the *carrier's*
   integrity independently of the payload (`TAMPERED` if the visible pixels/
   samples changed since signing, even though the payload itself decrypts and
@@ -133,11 +157,11 @@ circular.
 
 The honest limitation: tampering confined entirely to the masked-off low bits
 is invisible to this hash. That's a real gap, not an edge case we're ignoring
-— it's called out in `docs/format.md` §8 and worth stating plainly in the
+— it's called out in `docs/format.md` and worth stating plainly in the
 write-up.
 
 **This gap is much larger for audio than for images.** For 16-bit PCM WAV,
-§2 defines the carrier as the *low byte only* of each sample — so the cover
+defines the carrier as the *low byte only* of each sample — so the cover
 hash never sees the high byte at all, not just its low `num_lsb` bits. The
 high byte is the dominant, audible half of the sample: an attacker can
 substantially alter the audio's actual sound by rewriting every high byte and
@@ -157,8 +181,7 @@ not applied here; flagged as a limitation rather than fixed.
 
 The signature covers the ciphertext, not the plaintext, so a verifier can
 reject a forged or corrupted signature *before* spending effort decrypting —
-`SIGNATURE_INVALID` and `TAMPERED` stay cleanly separated (§9 explains why
-that separation matters for criterion 4).
+`SIGNATURE_INVALID` and `TAMPERED` stay cleanly separated.
 
 Encrypt-then-sign has a known weakness: if a verifier is ever willing to trust
 more than one public key, an attacker holding a second trusted keypair can
@@ -184,7 +207,7 @@ extended to multiple signers later.
 | `WRONG_START_LOCATION` | Magic marker not found at the derived offset, but present at offset 0 — this stego object doesn't match this passphrase. |
 | `CANNOT_VERIFY` | File unreadable, unsupported format, or an internal field (version, declared length) doesn't make sense — verification can't even be attempted. |
 
-Full precedence rules: `docs/format.md` §9.
+Full precedence rules: `docs/format.md`.
 
 **A nuance found during implementation:** because the RSA-PSS signature
 covers the entire `salt || iv || ciphertext` range, any tamper severe enough
@@ -220,20 +243,34 @@ proof of hidden data or tampering. `eval/attack_simulation.py` provides the
 companion reproducible security test matrix used by the GUI and automated
 tests.
 
-**Caveat found while testing this:** `docs/format.md` §11's demo claim
-("flags your own 8-LSB output while missing your 1-LSB output") could not be
-reliably reproduced against the synthetic cover images generated in this
-environment — a clean, regular pattern never triggers the attack regardless
-of embedding, and a jittered/noisy synthetic pattern already looks close to
-random in its low bits regardless of embedding. Real camera sensor noise
-sits between those two extremes, which neither synthetic approach
-reproduces. **Test this against a real photograph before the actual demo** —
-don't assume the synthetic samples in this repo will show the effect.
+## Video cover objects (innovation component)
+
+`core/video_stego.py` embeds into a video's *audio track only* — frames are
+stream-copied untouched via ffmpeg's `-c:v copy`, never re-encoded, never
+touched — and reuses `core/audio_stego.py`'s embed/extract/verify logic
+completely unchanged underneath (extract audio to WAV, run the existing
+audio pipeline, remux the result back with the original video stream). This
+was a deliberate scope decision over frame-level embedding: consumer video
+codecs are lossy and destroy LSB changes on re-encode, so frame embedding
+would require a lossless video codec and materially more new crypto/format
+surface for a bonus feature. Audio-track embedding gets a genuine third
+cover object while reusing already-tested code almost entirely.
+
+Stego videos (and covers, for the same reason) use `.mkv`, not `.mp4` -
+Matroska can carry PCM audio without re-encoding it; MP4 cannot reliably,
+and re-encoding would destroy the embedded payload.
+
+**The honest limitation:** this
+verifies the integrity of the video's *audio track only*. The cover hash
+never covers the visual frames, so a frame-only tamper (splicing different
+video onto the original, untouched, correctly-signed audio) is invisible to
+this scheme and reports `AUTHENTIC`. `samples/stego_video_frame_tampered_STILL_AUTHENTIC.mkv`
+demonstrates this concretely.
 
 ## Known limitations
 
 - **Halved effective capacity.** The derived offset lands in the first half of
-  the carrier space (§7) so a prefix-plus-body always fits regardless of
+  the carrier space so a prefix-plus-body always fits regardless of
   where the offset falls — real usable capacity per cover is roughly half the
   naive `C * num_lsb / 8` figure.
 - **LSB fragility.** Any recompression (saving stego output as JPEG) or
@@ -247,3 +284,6 @@ don't assume the synthetic samples in this repo will show the effect.
   key and the offset-derivation key. Lose it and the payload is
   unrecoverable, even by whoever embedded it; leak it and both
   confidentiality and the "obscurity" of the start location are gone at once.
+- **Video verifies audio only.** See "Video cover objects" above - frame-only
+  tampering is not detected by design, and `ffmpeg`/`ffprobe` must be on
+  PATH for any video feature to work at all.
