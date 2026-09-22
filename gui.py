@@ -148,6 +148,11 @@ class ACW1(tk.Tk):
         tk.Spinbox(right_frame, from_=1, to=8, textvariable=self.lsb_var, width=5).pack(anchor="w", pady=(0, 10))
         self.lsb_var.trace_add("write", lambda *_: self._refresh_message_size())
 
+        self.dsss_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            right_frame, text="Use DSSS for audio/video audio", variable=self.dsss_var
+        ).pack(anchor="w", pady=(0, 10))
+
         tk.Label(right_frame, text="Passphrase", font=("Segoe UI", 10, "bold")).pack(anchor="w")
         self.passphrase_var = tk.StringVar()
         tk.Entry(right_frame, textvariable=self.passphrase_var, show="*").pack(fill=tk.X, pady=(0, 10))
@@ -386,17 +391,33 @@ class ACW1(tk.Tk):
         payload_fields = {"meta": PAYLOAD_META, "message": self._message()}
         try:
             if self.active_kind == "image":
+                if self.dsss_var.get():
+                    messagebox.showwarning(
+                        "DSSS unavailable",
+                        "DSSS is available for WAV audio and video audio tracks, not images.",
+                    )
+                    return
                 start = image_stego.encode(
                     self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair, num_lsb
                 )
             elif self.active_kind == "audio":
-                start = audio_stego.encode(
-                    self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair, num_lsb
-                )
+                if self.dsss_var.get():
+                    start = audio_stego.encode_dsss(
+                        self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair
+                    )
+                else:
+                    start = audio_stego.encode(
+                        self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair, num_lsb
+                    )
             else:
-                start = video_stego.encode(
-                    self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair, num_lsb
-                )
+                if self.dsss_var.get():
+                    start = video_stego.encode_dsss(
+                        self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair
+                    )
+                else:
+                    start = video_stego.encode(
+                        self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair, num_lsb
+                    )
         except CapacityError as exc:
             messagebox.showerror("Payload too large", str(exc))
             return
@@ -438,9 +459,15 @@ class ACW1(tk.Tk):
             if kind == "image":
                 verdict, extracted = image_stego.decode(path, passphrase, self._trusted_keys)
             elif kind == "audio":
-                verdict, extracted = audio_stego.decode(path, passphrase, self._trusted_keys)
+                if self.dsss_var.get():
+                    verdict, extracted = audio_stego.decode_dsss(path, passphrase, self._trusted_keys)
+                else:
+                    verdict, extracted = audio_stego.decode(path, passphrase, self._trusted_keys)
             else:
-                verdict, extracted = video_stego.decode(path, passphrase, self._trusted_keys)
+                if self.dsss_var.get():
+                    verdict, extracted = video_stego.decode_dsss(path, passphrase, self._trusted_keys)
+                else:
+                    verdict, extracted = video_stego.decode(path, passphrase, self._trusted_keys)
         except Exception as exc:
             messagebox.showerror("Verify failed", str(exc))
             return
