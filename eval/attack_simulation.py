@@ -10,10 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 import wave
+import numpy as np
 
 from PIL import Image
 
-from core import audio_metrics, audio_stego, bitstream, image_stego, location, payload
+from core import bitstream, location, payload
+from eval import audio_metrics
+from media import audio_stego, image_stego
 from core.verdict import Verdict
 
 
@@ -73,8 +76,7 @@ def _visible_tamper(source: Path, target: Path, kind: str) -> None:
         frames = bytearray(reader.readframes(reader.getnframes()))
     if len(frames) < 2:
         raise ValueError("audio file must contain at least two raw sample bytes")
-    # For 16-bit PCM, index 0 is the low byte of sample 0; never target the
-    # high byte, which is deliberately outside the current carrier hash.
+
     frames[0] ^= 0x80
     with wave.open(str(target), "wb") as writer:
         writer.setparams(params)
@@ -82,7 +84,7 @@ def _visible_tamper(source: Path, target: Path, kind: str) -> None:
 
 
 def _payload_tamper(source: Path, target: Path, kind: str, passphrase: str) -> None:
-    """Flip a byte in the signed body, producing a signature failure."""
+    """Corrupt payload beyond ECC recovery capacity to trigger signature or decoding failure."""
     if kind == "image":
         carrier, meta = image_stego._load_carrier(source)
         cover_id = location.cover_id_for_image(meta["width"], meta["height"])
@@ -100,13 +102,14 @@ def _payload_tamper(source: Path, target: Path, kind: str, passphrase: str) -> N
 
     body_start = start + payload.PREFIX_CARRIER_LEN
     body_carrier_needed = -(-(prefix_info.body_len * 8) // prefix_info.num_lsb)
-    if body_carrier_needed < 1 or body_start + body_carrier_needed > len(carrier):
+    if body_carrier_needed < 16 or body_start + body_carrier_needed > len(carrier):
         raise ValueError("stego object is too small for payload corruption simulation")
 
-    # Select a byte within the actual body span, rather than relying on a
-    # fixed offset that may exceed a short carrier's valid payload range.
-    mutation_index = body_start + min(40, body_carrier_needed - 1)
-    carrier[mutation_index] ^= 0x01
+    # Corrupt 18 consecutive carrier bytes to ensure ECC limits (>8 corruptible bytes) are overwhelmed
+    corruption_len = min(18, body_carrier_needed)
+    for i in range(corruption_len):
+        carrier[body_start + i] ^= 0xFF
+
     save(target, carrier, meta)
 
 
@@ -148,6 +151,7 @@ def _substitute_payload(source: Path, target_cover: Path, target: Path, kind: st
     )
     if len(body) > target_capacity or target_body_start + body_carrier_needed > len(target_carrier):
         raise ValueError("target cover is too small for the substituted payload")
+
     bitstream.write_bits(target_carrier, target_start, prefix, num_lsb=1)
     bitstream.write_bits(
         target_carrier,
@@ -166,11 +170,7 @@ def run_attack_suite(
     output_dir: Path,
     cover_path: Optional[Path] = None,
 ) -> list[AttackCase]:
-    """Run repeatable attacks and return expected-versus-actual verdicts.
-
-    The output directory receives only generated attack copies. The original
-    stego object is never modified.
-    """
+    """Run repeatable attacks and return expected-versus-actual verdicts."""
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".png" if kind == "image" else ".wav"
     visible_path = output_dir / f"tampered_visible{suffix}"
@@ -207,14 +207,16 @@ def run_attack_suite(
             2,
             audio_quality,
         ),
-        *([] if any(case.name == "Hidden payload corruption" for case in cases) else [AttackCase(
-            "Hidden payload corruption",
-            Verdict.SIGNATURE_INVALID,
-            _verify(payload_path, kind, passphrase, trusted_keys),
-            payload_path,
-            "payload integrity",
-            2,
-        )]),
+        *([] if any(case.name == "Hidden payload corruption" for case in cases) else [
+            AttackCase(
+                "Hidden payload corruption",
+                (Verdict.SIGNATURE_INVALID, Verdict.CANNOT_VERIFY),
+                _verify(payload_path, kind, passphrase, trusted_keys),
+                payload_path,
+                "payload integrity",
+                2,
+            )
+        ]),
         AttackCase(
             "Wrong passphrase",
             (Verdict.PAYLOAD_MISSING, Verdict.WRONG_START_LOCATION),
@@ -260,3 +262,17 @@ def run_attack_suite(
                 )
             )
     return cases
+
+
+def attack_gaussian_noise(source: Path, target: Path, std_dev: float = 25.0) -> None:
+    """Adds white noise to WAV audio to simulate analog channel interference."""
+    with wave.open(str(source), "rb") as reader:
+        params = reader.getparams()
+        frames = np.frombuffer(reader.readframes(reader.getnframes()), dtype=np.int16)
+
+    noise = np.random.normal(0, std_dev, frames.shape)
+    corrupted = np.clip(frames + noise, -32768, 32767).astype(np.int16)
+
+    with wave.open(str(target), "wb") as writer:
+        writer.setparams(params)
+        writer.writeframes(corrupted.tobytes())

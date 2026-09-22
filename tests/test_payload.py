@@ -83,8 +83,14 @@ def test_capacity_boundary_exact_fit_then_one_byte_over():
     carrier_len, num_lsb, passphrase = 30000, 1, "hunter2"
     start = location.derive_start(COVER_ID, passphrase, carrier_len)
     capacity = payload_mod.max_body_len(carrier_len, start, num_lsb)
-    overhead = payload_mod.estimate_body_len("a", {}, demo_a) - 1  # everything except the message characters
-    exact_fit = "a" * (capacity - overhead)
+    low, high = 0, capacity
+    while low < high:
+        candidate = (low + high + 1) // 2
+        if payload_mod.estimate_body_len("a" * candidate, {}, demo_a) <= capacity:
+            low = candidate
+        else:
+            high = candidate - 1
+    exact_fit = "a" * low
 
     payload_mod.embed(bytearray(os.urandom(carrier_len)), COVER_ID, {"message": exact_fit}, passphrase, demo_a, num_lsb)
 

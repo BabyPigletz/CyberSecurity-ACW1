@@ -19,6 +19,7 @@ from core import bitstream, crypto, location
 from core.crypto import KeyPair
 from core.errors import CapacityError
 from core.verdict import Evidence, Verdict, decide
+from reedsolo import RSCodec, ReedSolomonError
 
 MAGIC = b"ACW1"
 VERSION = 0x02
@@ -28,6 +29,7 @@ SIG_LEN_FIELD = 2
 SALT_LEN = 16
 IV_LEN = 12
 GCM_TAG_LEN = 16
+ECC_SYMBOLS = 16  # Can recover up to 8 corrupted bytes
 
 
 @dataclass
@@ -69,6 +71,19 @@ class Extracted:
         return self.embedded_cover_hash == self.recomputed_cover_hash
 
 
+def apply_ecc(data: bytes, nsym: int = ECC_SYMBOLS) -> bytes:
+    rsc = RSCodec(nsym)
+    return bytes(rsc.encode(data))
+
+
+def remove_ecc(data: bytes, nsym: int = ECC_SYMBOLS) -> bytes:
+    rsc = RSCodec(nsym)
+    try:
+        return bytes(rsc.decode(data)[0])
+    except ReedSolomonError as e:
+        raise ValueError("Payload unrecoverable due to corruption.") from e
+
+
 def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -101,8 +116,14 @@ def _plaintext(payload: Payload) -> bytes:
 
 
 def estimate_body_len(message: str, meta: dict, keypair: KeyPair) -> int:
-    """Exact body size for an auto-generated payload, computed without encrypting or signing."""
-    # Every auto-generated field has a fixed width, so a placeholder payload serialises to the same length.
+    """Exact body size for an auto-generated payload.
+
+    The body layout includes a variable-length RSA signature and Reed-Solomon
+    ECC, so the safe and exact strategy is to mirror the real encoder's body
+    assembly rather than approximating from a hand-derived plaintext-length
+    formula. The passphrase only affects key derivation, not the encoded length,
+    so we can use a fixed dummy value here without changing the result.
+    """
     placeholder = Payload(
         media_id=str(uuid.UUID(int=0)),
         timestamp=_utc_now(),
@@ -112,8 +133,8 @@ def estimate_body_len(message: str, meta: dict, keypair: KeyPair) -> int:
         signer_key_id=keypair.key_id,
         message=message,
     )
-    sig_len = keypair.public_key.key_size // 8
-    return SIG_LEN_FIELD + sig_len + SALT_LEN + IV_LEN + len(_plaintext(placeholder)) + GCM_TAG_LEN
+    _, body = build_stego_bytes(placeholder, "estimate-body-len", keypair, num_lsb=1)
+    return len(body)
 
 
 def max_body_len(carrier_len: int, start: int, num_lsb: int) -> int:
@@ -122,10 +143,7 @@ def max_body_len(carrier_len: int, start: int, num_lsb: int) -> int:
 
 
 def build_stego_bytes(payload: Payload, passphrase: str, keypair: KeyPair, num_lsb: int) -> "tuple[bytes, bytes]":
-    """Assemble (prefix, body) per §4/§5. Returned separately because the
-    prefix is always written at 1 LSB while the body is written at num_lsb -
-    a single concatenated blob can't express that split.
-    """
+    """Assemble (prefix, body) per §4/§5 with Reed-Solomon protection."""
     plaintext = _plaintext(payload)
     random_salt = os.urandom(SALT_LEN)
     aes_key = crypto.derive_aes_key(passphrase, random_salt)
@@ -133,7 +151,8 @@ def build_stego_bytes(payload: Payload, passphrase: str, keypair: KeyPair, num_l
     signed_data = random_salt + iv + ciphertext
     signature = crypto.sign(keypair.private_key, signed_data)
 
-    body = len(signature).to_bytes(SIG_LEN_FIELD, "big") + signature + random_salt + iv + ciphertext
+    protected_body = apply_ecc(signed_data)
+    body = len(signature).to_bytes(SIG_LEN_FIELD, "big") + signature + protected_body
     prefix = build_prefix(num_lsb, len(body))
     return prefix, body
 
@@ -141,17 +160,18 @@ def build_stego_bytes(payload: Payload, passphrase: str, keypair: KeyPair, num_l
 def parse_body(
     carrier, start: int, num_lsb: int, body_len: int, passphrase: str, trusted_keys: dict
 ) -> BodyResult:
-    """Read+interpret the body. Never raises for expected verification
-    failures (bad signature, bad tag, unparsable JSON) - those become fields
-    on the returned result for verdict.decide to interpret.
-    """
+    """Read+interpret the body with Reed-Solomon recovery."""
     raw = bitstream.read_bits(carrier, start, body_len, num_lsb)
     sig_len = int.from_bytes(raw[0:2], "big")
     signature = raw[2:2 + sig_len]
-    salt = raw[2 + sig_len:18 + sig_len]
-    iv = raw[18 + sig_len:30 + sig_len]
-    ciphertext = raw[30 + sig_len:]
-    signed_data = salt + iv + ciphertext
+
+    try:
+        signed_data = remove_ecc(raw[2 + sig_len:])
+        salt = signed_data[0:SALT_LEN]
+        iv = signed_data[SALT_LEN:SALT_LEN + IV_LEN]
+        ciphertext = signed_data[SALT_LEN + IV_LEN:]
+    except ValueError:
+        return BodyResult(None, False, None, None, None)
 
     verified_key_id = None
     for key_id, pub in trusted_keys.items():
@@ -171,6 +191,69 @@ def parse_body(
         return BodyResult(verified_key_id, True, None, None, None)
 
     return BodyResult(verified_key_id, True, obj.get("signer_key_id"), obj.get("cover_hash"), obj)
+
+
+def parse_body_from_bytes(raw: bytes, passphrase: str, trusted_keys: dict) -> "tuple[Verdict, Optional[Extracted]]":
+    """Parse a raw payload byte stream (as produced by DSSS extraction) without a carrier.
+
+    The payload format is still the same prefix + signed body layout from the carrier-based
+    decoder. This helper is intentionally lighter-weight: it verifies the embedded signature and
+    AES-GCM content and returns the same verdict/extracted payload shape that the DSSS decoder
+    expects, without trying to re-derive a cover hash from the carrier itself.
+    """
+    if len(raw) < PREFIX_LEN:
+        return Verdict.PAYLOAD_MISSING, None
+
+    prefix = parse_prefix_bytes(raw[:PREFIX_LEN])
+    if not prefix.magic_ok:
+        return Verdict.PAYLOAD_MISSING, None
+
+    if prefix.version != VERSION or not 1 <= prefix.num_lsb <= 8:
+        return Verdict.CANNOT_VERIFY, None
+
+    body_start = PREFIX_LEN
+    body_end = body_start + prefix.body_len
+    if len(raw) < body_end:
+        return Verdict.CANNOT_VERIFY, None
+
+    body = raw[body_start:body_end]
+    sig_len = int.from_bytes(body[0:2], "big")
+    signature = body[2:2 + sig_len]
+
+    try:
+        signed_data = remove_ecc(body[2 + sig_len:])
+        salt = signed_data[0:SALT_LEN]
+        iv = signed_data[SALT_LEN:SALT_LEN + IV_LEN]
+        ciphertext = signed_data[SALT_LEN + IV_LEN:]
+    except ValueError:
+        return Verdict.TAMPERED, None
+
+    verified_key_id = None
+    for key_id, pub in trusted_keys.items():
+        if crypto.verify(pub, signed_data, signature):
+            verified_key_id = key_id
+            break
+
+    if verified_key_id is None:
+        return Verdict.SIGNATURE_INVALID, None
+
+    aes_key = crypto.derive_aes_key(passphrase, salt)
+    try:
+        plaintext = crypto.decrypt(aes_key, iv, ciphertext)
+    except InvalidTag:
+        return Verdict.TAMPERED, None
+
+    try:
+        obj = json.loads(plaintext.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return Verdict.CANNOT_VERIFY, None
+
+    if obj.get("signer_key_id") is not None and verified_key_id != obj.get("signer_key_id"):
+        return Verdict.SIGNATURE_INVALID, None
+
+    cover_hash_hex = obj.get("cover_hash")
+    extracted = Extracted(obj, cover_hash_hex, cover_hash_hex or "")
+    return Verdict.AUTHENTIC, extracted
 
 
 def _try_read_prefix(carrier, start: int, carrier_len: int) -> Optional[PrefixInfo]:
@@ -254,10 +337,9 @@ def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tupl
         recomputed = crypto.canonical_hash(bytes(carrier), prefix_derived.num_lsb).hex()
         ev.cover_hash_matches = body_result.cover_hash_hex == recomputed
     else:
-        ev.cover_hash_matches = True  # irrelevant - TAMPERED already decided by gcm_tag_ok
+        ev.cover_hash_matches = True
 
     verdict = decide(ev)
-    # The signature is what vouches for this data, so it is never released without a valid one.
     if recomputed is None or verdict not in (Verdict.AUTHENTIC, Verdict.TAMPERED):
         return verdict, None
     return verdict, Extracted(body_result.parsed, body_result.cover_hash_hex, recomputed)

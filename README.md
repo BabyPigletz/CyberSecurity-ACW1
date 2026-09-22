@@ -26,7 +26,7 @@ on Linux the app uses `paplay`, `pw-play` or `aplay`, whichever is installed.
 On Ubuntu or WSL, install one with `sudo apt install pulseaudio-utils` (WSLg
 already provides the PulseAudio server it talks to).
 
-To run the test suite (95 tests, all against synthetic data or the fixtures
+To run the test suite (132 tests, all against synthetic data or the fixtures
 in `samples/` — no real image/audio hardware needed except for actually
 *hearing* playback, which the tests don't attempt):
 
@@ -47,6 +47,19 @@ also reports changed samples, mean absolute error, and signal-to-noise ratio.
 **Compare Steganalysis** compares matching cover/stego windows at multiple
 scales and reports cross-scale agreement. Attack artifacts are written to a
 folder selected in the GUI; the original stego object is never changed.
+
+### DSSS audio support
+
+The project also includes a direct-sequence spread-spectrum (DSSS) audio lane
+for more resilient payload embedding/extraction. The payload is spread across
+audio sample blocks using a passphrase-derived PRN sequence, then recovered by
+recomputing the same chip pattern during decode. This path is validated with:
+
+```
+python -m pytest tests/test_audio_stego.py -k "dsss" -v
+```
+
+and the focused DSSS round-trip test passes successfully.
 
 ## What it does
 
@@ -185,7 +198,7 @@ it as a second, independently-reachable demo path.
 
 ## Steganalysis (innovation component)
 
-`core/steganalysis.py` implements Westfeld & Pfitzmann's chi-square
+`eval/steganalysis.py` implements Westfeld & Pfitzmann's chi-square
 Pairs-of-Values attack — a sliding-window statistical test that flags
 regions whose byte-value pairs look artificially randomized, which is what
 LSB-replacement produces. Verified against a constructed buffer (a
@@ -195,7 +208,7 @@ windowed p-value transitions sharply and exactly at the boundary — see
 comparison at 512, 1024, and 2048-byte windows and reports how many scales
 agree before presenting a suspicious-region assessment.
 
-`core/attack_simulation.py` also tests replay resistance by transplanting a
+`eval/attack_simulation.py` also tests replay resistance by transplanting a
 valid encrypted payload into a different cover. The embedded cover hash then
 fails against the new carrier and produces `TAMPERED`, demonstrating that a
 valid signed payload cannot simply be reused with another media object.
@@ -203,7 +216,7 @@ valid signed payload cannot simply be reused with another media object.
 The paired analysis extension compares the original cover and stego windows,
 requiring both a high stego p-value and a meaningful increase over the cover's
 p-value before marking a region suspicious. This is statistical evidence, not
-proof of hidden data or tampering. `core/attack_simulation.py` provides the
+proof of hidden data or tampering. `eval/attack_simulation.py` provides the
 companion reproducible security test matrix used by the GUI and automated
 tests.
 

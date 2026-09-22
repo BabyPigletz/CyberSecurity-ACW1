@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -80,8 +81,16 @@ def encrypt(aes_key: bytes, plaintext: bytes) -> "tuple[bytes, bytes]":
 
 
 def decrypt(aes_key: bytes, iv: bytes, ciphertext: bytes) -> bytes:
-    """Raises cryptography.exceptions.InvalidTag on tag mismatch - caller maps that to TAMPERED."""
-    return AESGCM(aes_key).decrypt(iv, ciphertext, None)
+    """Normalize malformed/nonces into the caller-visible GCM authentication failure.
+
+    A malformed nonce or truncated payload is not a recoverable decrypt condition;
+    callers treat this as a tampered payload and surface it as TAMPERED or
+    SIGNATURE_INVALID rather than crashing with a raw ValueError.
+    """
+    try:
+        return AESGCM(aes_key).decrypt(iv, ciphertext, None)
+    except ValueError as exc:
+        raise InvalidTag("Malformed AES-GCM nonce or ciphertext") from exc
 
 
 def sign(private_key: rsa.RSAPrivateKey, data: bytes) -> bytes:
