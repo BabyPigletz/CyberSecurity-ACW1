@@ -119,6 +119,28 @@ def encode(in_path: Path, out_path: Path, payload_fields: dict,
     return offset
 
 
+def encode_dsss(in_path: Path, out_path: Path, payload_fields: dict,
+                passphrase: str, keypair: KeyPair, chip_length: int = 256) -> int:
+    """Embed a DSSS payload into the video's extracted audio track.
+
+    The default video API remains LSB-based; this explicit method opts into the
+    more noise-resilient DSSS audio path and returns the encoded payload length,
+    matching ``audio_stego.encode_dsss``.
+    """
+    _require_ffmpeg()
+    if not _has_audio_stream(in_path):
+        raise UnsupportedFormatError("Video has no audio track to embed into.")
+    with tempfile.TemporaryDirectory() as tmp:
+        extracted_wav = Path(tmp) / "extracted.wav"
+        stego_wav = Path(tmp) / "stego.wav"
+        _extract_audio_to_wav(in_path, extracted_wav)
+        payload_length = audio_stego.encode_dsss(
+            extracted_wav, stego_wav, payload_fields, passphrase, keypair, chip_length
+        )
+        _remux_video_with_audio(in_path, stego_wav, out_path)
+    return payload_length
+
+
 def decode(path: Path, passphrase: str, trusted_keys: dict):
     """Extract the payload from a stego video's audio track. Returns the
     same result object as audio_stego.decode (verdict, payload, etc.)."""
@@ -129,6 +151,20 @@ def decode(path: Path, passphrase: str, trusted_keys: dict):
         wav_path = Path(tmp) / "extracted.wav"
         _extract_audio_to_wav(path, wav_path)
         return audio_stego.decode(wav_path, passphrase, trusted_keys)
+
+
+def decode_dsss(path: Path, passphrase: str, trusted_keys: dict,
+                chip_length: int = 256, expected_bytes_len: int | None = None):
+    """Extract and verify a DSSS payload from the video's audio track."""
+    _require_ffmpeg()
+    if not _has_audio_stream(path):
+        raise UnsupportedFormatError("Video has no audio track to extract from.")
+    with tempfile.TemporaryDirectory() as tmp:
+        wav_path = Path(tmp) / "extracted.wav"
+        _extract_audio_to_wav(path, wav_path)
+        return audio_stego.decode_dsss(
+            wav_path, passphrase, trusted_keys, chip_length, expected_bytes_len
+        )
 
 
 def _load_carrier(path: Path):
