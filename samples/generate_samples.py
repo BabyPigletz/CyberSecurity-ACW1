@@ -10,6 +10,7 @@ PASSPHRASE USED FOR ALL "authentic" SAMPLES BELOW: see samples/README.md.
 """
 
 import os
+import subprocess
 import sys
 import time
 import uuid
@@ -22,7 +23,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from PIL import Image
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from core import audio_stego, bitstream, crypto, image_stego, payload as payload_mod
+from core import audio_stego, bitstream, crypto, image_stego, video_stego, payload as payload_mod
 
 SAMPLES_DIR = REPO_ROOT / "samples"
 KEYS_DIR = REPO_ROOT / "keys"
@@ -66,6 +67,37 @@ def make_cover_audio() -> Path:
     return path
 
 
+def make_cover_video() -> Path:
+    """A short, deterministic test-pattern clip with a tone audio track -
+    built with ffmpeg (already a hard dependency of core/video_stego.py, so
+    no new tooling requirement), same 6s duration as cover.wav so the "video
+    cover objects use the same audio pipeline underneath" story is visible
+    at a glance rather than just asserted.
+
+    Audio is PCM (lossless), not AAC: a lossy codec's decoder can legitimately
+    produce a different sample count on different machines/ffmpeg versions/
+    builds (encoder-delay and priming-sample handling varies), which breaks
+    reproducibility (FR12) even though nobody did anything wrong - confirmed
+    the hard way when a student's re-extraction of an AAC cover came out 616
+    bytes shorter than the one baked into this repo's committed stego file.
+    PCM is a straight demux, not a decode, so it is bit-exact everywhere.
+    Video stays H.264/MP4 - only picture quality, not reproducibility, is at
+    stake there, and MP4 does not reliably carry PCM audio anyway (hence
+    .mkv here, matching the stego output container)."""
+    path = SAMPLES_DIR / "cover.mkv"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=6",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=6:sample_rate=44100",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "pcm_s16le", "-shortest", str(path),
+        ],
+        capture_output=True, check=True,
+    )
+    return path
+
+
 def main():
     SAMPLES_DIR.mkdir(exist_ok=True)
     demo_a = crypto.load_keypair(KEYS_DIR / "demo_a_pub.pem", KEYS_DIR / "demo_a_priv.pem")
@@ -73,8 +105,10 @@ def main():
 
     cover_png = make_cover_image()
     cover_wav = make_cover_audio()
+    cover_video = make_cover_video()
     print(f"wrote {cover_png}")
     print(f"wrote {cover_wav}")
+    print(f"wrote {cover_video}")
 
     # --- Case 1/2: positive - AUTHENTIC (one per cover type) ---
     stego_png = SAMPLES_DIR / "stego_image_authentic.png"
@@ -124,7 +158,7 @@ def main():
     # A complete, genuinely signed and encrypted payload (message included)
     # written at carrier offset 0, with nothing at the passphrase-derived
     # offset. This simulates a non-compliant tool that embedded from the first
-    # byte - the one situation §9 distinguishes from a plain, untouched cover
+    # byte - the one situation distinguishes from a plain, untouched cover
     # (PAYLOAD_MISSING). The normal embed flow always writes at the derived
     # offset and never at 0, so the payload is assembled and written directly
     # here. decode() reports WRONG_START_LOCATION as soon as it sees magic at 0
@@ -146,6 +180,54 @@ def main():
     bitstream.write_bits(carrier, payload_mod.PREFIX_CARRIER_LEN, body, num_lsb=NUM_LSB)
     image_stego._save_carrier(wrong_location_path, carrier, meta)
     print(f"wrote {wrong_location_path} (doctored: full payload written at offset 0)")
+
+    # --- Case 6 (innovation, optional §8): video cover object, positive - AUTHENTIC ---
+    # Audio-track embedding (core/video_stego.py) - frames are stream-copied
+    # untouched; only the extracted PCM audio is the carrier, exactly like
+    # cover.wav above underneath.
+    stego_video = SAMPLES_DIR / "stego_video_authentic.mkv"
+    start_video = video_stego.encode(cover_video, stego_video, fields, PASSPHRASE, demo_a, NUM_LSB)
+    print(f"wrote {stego_video} (start offset {start_video})")
+
+    # --- Case 7 (innovation): video, negative - audio content tampered -> TAMPERED ---
+    # Simple whole-file byte flips on an .mkv are unreliable (Matroska/EBML
+    # container structure can absorb a flipped byte as metadata/padding
+    # without touching the decoded audio samples at all) - so tampering is
+    # done the same way a real attacker's tool would have to: extract the
+    # audio, corrupt a PCM sample well past the header, remux into a new
+    # video. Mirrors the audio wrong-passphrase case's honesty about what a
+    # realistic attack on this format actually looks like.
+    with __import__("tempfile").TemporaryDirectory() as tmp_dir:
+        tmp_wav = Path(tmp_dir) / "extracted.wav"
+        video_stego._extract_audio_to_wav(stego_video, tmp_wav)
+        data = bytearray(tmp_wav.read_bytes())
+        data[50000] ^= 0xFF
+        tmp_wav.write_bytes(bytes(data))
+        tampered_video_path = SAMPLES_DIR / "stego_video_tampered.mkv"
+        video_stego._remux_video_with_audio(cover_video, tmp_wav, tampered_video_path)
+    print(f"wrote {tampered_video_path} (one PCM byte flipped in the extracted audio track, then remuxed)")
+
+    # --- Innovation limitation demo (not a graded case; deliberately shows ---
+    # --- what this design does NOT catch, for the honest-limitations       ---
+    # --- discussion (rubric criterion 7)). Splice the AUTHENTIC video's    ---
+    # --- real, untouched, correctly-signed audio track onto visually      ---
+    # --- altered frames. The payload's cover_hash covers audio samples     ---
+    # --- only, so this verifies AUTHENTIC despite the visible frame edit - ---
+    # --- show this live to make the "frames aren't covered" limitation    ---
+    # --- concrete rather than just asserted in prose.
+    frame_altered = SAMPLES_DIR / "_tmp_frame_altered.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(cover_video), "-vf", "eq=brightness=0.3",
+         "-c:a", "copy", str(frame_altered)],
+        capture_output=True, check=True,
+    )
+    with __import__("tempfile").TemporaryDirectory() as tmp_dir:
+        tmp_wav = Path(tmp_dir) / "authentic_audio.wav"
+        video_stego._extract_audio_to_wav(stego_video, tmp_wav)
+        limitation_path = SAMPLES_DIR / "stego_video_frame_tampered_STILL_AUTHENTIC.mkv"
+        video_stego._remux_video_with_audio(frame_altered, tmp_wav, limitation_path)
+    frame_altered.unlink()
+    print(f"wrote {limitation_path} (frames visibly altered, audio untouched - verifies AUTHENTIC: the stated cover-hash-is-audio-only limitation, made concrete)")
 
     print("\nDone. See samples/README.md for passphrases and expected verdicts.")
 

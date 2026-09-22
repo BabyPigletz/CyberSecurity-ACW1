@@ -9,11 +9,12 @@ normal verification path.
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+import tempfile
 import wave
 
 from PIL import Image
 
-from core import audio_metrics, audio_stego, bitstream, image_stego, location, payload
+from core import audio_metrics, audio_stego, bitstream, image_stego, location, payload, video_stego
 from core.verdict import Verdict
 
 
@@ -54,13 +55,27 @@ def score_cases(cases: list[AttackCase]) -> AttackScore:
 def _verify(path: Path, kind: str, passphrase: str, trusted_keys: dict) -> Verdict:
     if kind == "image":
         verdict, _ = image_stego.decode(path, passphrase, trusted_keys)
-    else:
+    elif kind == "audio":
         verdict, _ = audio_stego.decode(path, passphrase, trusted_keys)
+    else:
+        verdict, _ = video_stego.decode(path, passphrase, trusted_keys)
     return verdict
 
 
 def _visible_tamper(source: Path, target: Path, kind: str) -> None:
     """Change a high-order carrier bit without intentionally corrupting payload bits."""
+    if kind == "video":
+        # Recurse on the extracted audio track (reuses the audio branch
+        # below unchanged), then remux with the source's own, untouched
+        # video stream. Same pattern as core/video_stego.py's encode/decode.
+        with tempfile.TemporaryDirectory() as tmp:
+            source_wav = Path(tmp) / "source.wav"
+            tampered_wav = Path(tmp) / "tampered.wav"
+            video_stego._extract_audio_to_wav(source, source_wav)
+            _visible_tamper(source_wav, tampered_wav, "audio")
+            video_stego._remux_video_with_audio(source, tampered_wav, target)
+        return
+
     if kind == "image":
         image = Image.open(source).convert("RGB")
         red, green, blue = image.getpixel((0, 0))
@@ -83,6 +98,15 @@ def _visible_tamper(source: Path, target: Path, kind: str) -> None:
 
 def _payload_tamper(source: Path, target: Path, kind: str, passphrase: str) -> None:
     """Flip a byte in the signed body, producing a signature failure."""
+    if kind == "video":
+        with tempfile.TemporaryDirectory() as tmp:
+            source_wav = Path(tmp) / "source.wav"
+            tampered_wav = Path(tmp) / "tampered.wav"
+            video_stego._extract_audio_to_wav(source, source_wav)
+            _payload_tamper(source_wav, tampered_wav, "audio", passphrase)  # may raise ValueError - propagate as-is
+            video_stego._remux_video_with_audio(source, tampered_wav, target)
+        return
+
     if kind == "image":
         carrier, meta = image_stego._load_carrier(source)
         cover_id = location.cover_id_for_image(meta["width"], meta["height"])
@@ -112,6 +136,17 @@ def _payload_tamper(source: Path, target: Path, kind: str, passphrase: str) -> N
 
 def _substitute_payload(source: Path, target_cover: Path, target: Path, kind: str, passphrase: str) -> None:
     """Place a valid payload from one object into a different cover object."""
+    if kind == "video":
+        with tempfile.TemporaryDirectory() as tmp:
+            source_wav = Path(tmp) / "source.wav"
+            target_cover_wav = Path(tmp) / "target_cover.wav"
+            result_wav = Path(tmp) / "result.wav"
+            video_stego._extract_audio_to_wav(source, source_wav)
+            video_stego._extract_audio_to_wav(target_cover, target_cover_wav)
+            _substitute_payload(source_wav, target_cover_wav, result_wav, "audio", passphrase)  # may raise ValueError
+            video_stego._remux_video_with_audio(target_cover, result_wav, target)
+        return
+
     if kind == "image":
         source_carrier, source_meta = image_stego._load_carrier(source)
         target_carrier, target_meta = image_stego._load_carrier(target_cover)
@@ -172,7 +207,7 @@ def run_attack_suite(
     stego object is never modified.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = ".png" if kind == "image" else ".wav"
+    suffix = {"image": ".png", "audio": ".wav", "video": ".mkv"}[kind]
     visible_path = output_dir / f"tampered_visible{suffix}"
     payload_path = output_dir / f"tampered_payload{suffix}"
 
@@ -195,7 +230,28 @@ def run_attack_suite(
 
     audio_quality = None
     if kind == "audio" and cover_path is not None:
-        audio_quality = audio_metrics.compare(cover_path, stego_path)
+        try:
+            audio_quality = audio_metrics.compare(cover_path, stego_path)
+        except ValueError:
+            # cover_path/stego_path don't correspond to the same original
+            # (e.g. a different file was loaded as "cover" than the one this
+            # stego was actually embedded from) - the 5 security cases below
+            # don't depend on this, so degrade gracefully rather than aborting
+            # the whole simulation over a bonus metric.
+            audio_quality = None
+    elif kind == "video" and cover_path is not None:
+        # Same metrics engine as the audio case, run against each file's
+        # extracted audio track rather than the video container directly -
+        # audio_metrics.compare only understands WAV.
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cover_wav = Path(tmp) / "cover.wav"
+                stego_wav = Path(tmp) / "stego.wav"
+                video_stego._extract_audio_to_wav(cover_path, cover_wav)
+                video_stego._extract_audio_to_wav(stego_path, stego_wav)
+                audio_quality = audio_metrics.compare(cover_wav, stego_wav)
+        except ValueError:
+            audio_quality = None
 
     cases.extend([
         AttackCase(
