@@ -133,6 +133,16 @@ def encode_dsss(in_path: Path, out_path: Path, payload_fields: dict, passphrase:
     if (len(bits) * chip_length) > (len(samples) - start):
         start = 0
 
+    required_samples = len(bits) * chip_length
+    available_samples = len(samples) - start
+    if required_samples > available_samples:
+        raise CapacityError(
+            "DSSS payload is too large for this audio track: "
+            f"requires {required_samples:,} samples, but only "
+            f"{available_samples:,} are available. Use a longer WAV/video "
+            "audio track or a smaller chip_length."
+        )
+
     seed_bytes = hashlib.sha256(passphrase.encode("utf-8")).digest()[:4]
     seed = int.from_bytes(seed_bytes, "big")
     rng = np.random.default_rng(seed)

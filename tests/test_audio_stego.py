@@ -185,3 +185,19 @@ def test_dsss_audio_encode_decode_round_trip(tmp_path):
     # 3. Assertions
     assert verdict == Verdict.AUTHENTIC
     assert extracted.payload["message"] == "DSSS resilient payload"
+
+
+def test_dsss_oversized_payload_raises_capacity_error(tmp_path):
+    demo_a = _keys()
+    cover_wav = tmp_path / "small_cover.wav"
+    _make_wav(cover_wav, n_frames=100)
+
+    with pytest.raises(CapacityError, match="DSSS payload is too large"):
+        audio_stego.encode_dsss(
+            cover_wav,
+            tmp_path / "stego_dsss.wav",
+            {"message": "payload"},
+            "hunter2",
+            demo_a,
+            chip_length=64,
+        )
