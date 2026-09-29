@@ -130,6 +130,35 @@ def main():
     img.save(tampered_path, format="PNG")
     print(f"wrote {tampered_path} (bit 7 of pixel (0,0).R flipped after signing)")
 
+    # --- Case 3b: negative - tampered samples -> TAMPERED (audio) ---
+    # Mirrors the image case, but made audible so it can be heard in the demo:
+    # a 0.5 s window (3.0 s - 3.5 s) of stego_audio_authentic.wav is silenced
+    # after signing. Only bits ABOVE the low NUM_LSB bits are cleared - the
+    # low bits of every carrier byte are kept exactly as embedded, so the
+    # signed payload survives intact wherever it happens to sit, and the
+    # signature still verifies. The low byte of each sample IS a carrier byte
+    # (docs/format.md s2), so the cover hash over the masked carrier sees the
+    # change -> TAMPERED, not SIGNATURE_INVALID.
+    #
+    # Deliberately NOT a high-byte-only edit: the audio cover hash never sees
+    # high bytes (README "Why the cover hash is over an LSB-masked
+    # representation"), so a high-byte-only tamper would verify AUTHENTIC.
+    # Clearing the low byte's upper bits too is what makes this detectable.
+    tampered_wav_path = SAMPLES_DIR / "stego_audio_tampered.wav"
+    wav_carrier, wav_meta = audio_stego._load_carrier(stego_wav)
+    raw = bytearray(wav_meta["raw"])
+    keep_mask = (1 << NUM_LSB) - 1
+    framerate = wav_meta["framerate"]
+    first = 3 * framerate * wav_meta["n_channels"]
+    last = int(3.5 * framerate) * wav_meta["n_channels"]
+    for sample in range(first, last):
+        raw[2 * sample] &= keep_mask  # low byte: keep payload bits, clear the rest
+        raw[2 * sample + 1] = 0       # high byte: silence
+    wav_meta["raw"] = bytes(raw)
+    wav_carrier = bytearray(raw[0::2])  # keep the carrier in step with the edited low bytes
+    audio_stego._save_carrier(tampered_wav_path, wav_carrier, wav_meta)
+    print(f"wrote {tampered_wav_path} (3.0s-3.5s silenced after signing; low {NUM_LSB} bits kept)")
+
     # --- Case 4: negative - wrong passphrase -> PAYLOAD_MISSING (audio) ---
     # No separate fixture: reuse stego_audio_authentic.wav, verified in the GUI
     # with a different passphrase. Decision (this session): a wrong passphrase
@@ -153,6 +182,12 @@ def main():
     wrong_key_path = SAMPLES_DIR / "stego_image_wrong_key.png"
     image_stego.encode(cover_png, wrong_key_path, fields, PASSPHRASE, forged_keypair, NUM_LSB)
     print(f"wrote {wrong_key_path} (signed by a throwaway key the GUI's trusted set does not contain)")
+
+    # --- Case 5b: negative - wrong key -> SIGNATURE_INVALID (audio) ---
+    # Same throwaway key as the image case, used once more before it is discarded.
+    wrong_key_wav_path = SAMPLES_DIR / "stego_audio_wrong_key.wav"
+    audio_stego.encode(cover_wav, wrong_key_wav_path, fields, PASSPHRASE, forged_keypair, NUM_LSB)
+    print(f"wrote {wrong_key_wav_path} (signed by a throwaway key the GUI's trusted set does not contain)")
     del forged_private, forged_keypair  # no private key material persists past this point
 
     # --- Extra: WRONG_START_LOCATION fixture (not one of the 5 demo cases, ---
