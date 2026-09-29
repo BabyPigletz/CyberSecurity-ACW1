@@ -153,6 +153,13 @@ class ACW1(tk.Tk):
             right_frame, text="Use DSSS for audio/video audio", variable=self.dsss_var
         ).pack(anchor="w", pady=(0, 10))
 
+        tk.Label(right_frame, text="DSSS Chip Length (32-256)", font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        self.dsss_chip_var = tk.IntVar(value=256)
+        tk.Spinbox(
+            right_frame, from_=32, to=256, increment=32,
+            textvariable=self.dsss_chip_var, width=5
+        ).pack(anchor="w", pady=(0, 10))
+
         tk.Label(right_frame, text="Passphrase", font=("Segoe UI", 10, "bold")).pack(anchor="w")
         self.passphrase_var = tk.StringVar()
         tk.Entry(right_frame, textvariable=self.passphrase_var, show="*").pack(fill=tk.X, pady=(0, 10))
@@ -403,7 +410,8 @@ class ACW1(tk.Tk):
             elif self.active_kind == "audio":
                 if self.dsss_var.get():
                     start = audio_stego.encode_dsss(
-                        self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair
+                        self.cover_path, out_path, payload_fields, passphrase,
+                        self._signer_keypair, chip_length=self.dsss_chip_var.get()
                     )
                 else:
                     start = audio_stego.encode(
@@ -412,7 +420,8 @@ class ACW1(tk.Tk):
             else:
                 if self.dsss_var.get():
                     start = video_stego.encode_dsss(
-                        self.cover_path, out_path, payload_fields, passphrase, self._signer_keypair
+                        self.cover_path, out_path, payload_fields, passphrase,
+                        self._signer_keypair, chip_length=self.dsss_chip_var.get()
                     )
                 else:
                     start = video_stego.encode(
@@ -460,12 +469,18 @@ class ACW1(tk.Tk):
                 verdict, extracted = image_stego.decode(path, passphrase, self._trusted_keys)
             elif kind == "audio":
                 if self.dsss_var.get():
-                    verdict, extracted = audio_stego.decode_dsss(path, passphrase, self._trusted_keys)
+                    verdict, extracted = audio_stego.decode_dsss(
+                        path, passphrase, self._trusted_keys,
+                        chip_length=self.dsss_chip_var.get()
+                    )
                 else:
                     verdict, extracted = audio_stego.decode(path, passphrase, self._trusted_keys)
             else:
                 if self.dsss_var.get():
-                    verdict, extracted = video_stego.decode_dsss(path, passphrase, self._trusted_keys)
+                    verdict, extracted = video_stego.decode_dsss(
+                        path, passphrase, self._trusted_keys,
+                        chip_length=self.dsss_chip_var.get()
+                    )
                 else:
                     verdict, extracted = video_stego.decode(path, passphrase, self._trusted_keys)
         except Exception as exc:
