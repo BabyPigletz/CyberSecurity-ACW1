@@ -10,11 +10,13 @@ PASSPHRASE USED FOR ALL "authentic" SAMPLES BELOW: see samples/README.md.
 """
 
 import os
+import random
 import subprocess
 import sys
 import time
 import uuid
 import wave
+from array import array
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -25,13 +27,17 @@ from media import audio_stego, image_stego
 from PIL import Image
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from core import bitstream, crypto, payload as payload_mod, video_stego
+from core import bitstream, crypto, location, payload as payload_mod, video_stego
 
 SAMPLES_DIR = REPO_ROOT / "samples"
 KEYS_DIR = REPO_ROOT / "keys"
 PASSPHRASE = "INF2005-P1-6-demo"
 NUM_LSB = 2
 # Learning Outcome 1 from the assignment spec, verbatim. Every stego fixture carries it.
+# DSSS chip length used by every DSSS fixture. 32 is the longest chip that
+# fits the ~660-byte payload into the 6 s cover.wav (64 needs ~7.7 s).
+# Must match the GUI's "DSSS Chip Length" box when verifying these files.
+DSSS_CHIP = 32
 MESSAGE = "Explain how steganography can be used to embed hidden verification data in image and audio cover objects."
 
 
@@ -98,6 +104,61 @@ def make_cover_video() -> Path:
         capture_output=True, check=True,
     )
     return path
+
+
+def _read_pcm16(path: Path):
+    """Return (samples as a mutable int16 array, wave params)."""
+    with wave.open(str(path), "rb") as wf:
+        params = wf.getparams()
+        raw = wf.readframes(wf.getnframes())
+    return array("h", raw), params
+
+
+def _write_pcm16(path: Path, samples, params) -> None:
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(params.nchannels)
+        wf.setsampwidth(params.sampwidth)
+        wf.setframerate(params.framerate)
+        wf.writeframes(samples.tobytes())
+
+
+def add_gaussian_noise(src: Path, dst: Path, sigma: float, seed: int) -> None:
+    """White Gaussian noise of standard deviation sigma (in 16-bit sample
+    units), clipped to range. Seeded so the fixture is identical on every
+    run (FR12) - an unseeded generator would make the "after" file differ
+    each time and could, at the margins, flip the verdict."""
+    samples, params = _read_pcm16(src)
+    rng = random.Random(seed)
+    for i, value in enumerate(samples):
+        samples[i] = max(-32768, min(32767, round(value + rng.gauss(0.0, sigma))))
+    _write_pcm16(dst, samples, params)
+
+
+def add_dropout(src: Path, dst: Path, start_sample: int, duration_ms: float) -> None:
+    """Silence duration_ms of audio from start_sample - a burst error, like a
+    glitch, packet loss or a cut. Unlike white noise, it wipes out a run of
+    CONSECUTIVE DSSS bits, which is the case Reed-Solomon is designed for."""
+    samples, params = _read_pcm16(src)
+    n = int(params.framerate * duration_ms / 1000) * params.nchannels
+    for i in range(start_sample, min(start_sample + n, len(samples))):
+        samples[i] = 0
+    _write_pcm16(dst, samples, params)
+
+
+def dsss_payload_midpoint(cover: Path, passphrase: str, payload_len: int, chip_length: int) -> int:
+    """The sample in the middle of the DSSS payload region - mirrors the
+    start-offset rule in audio_stego.encode_dsss (derived offset if the
+    payload fits after it, otherwise sample 0). Dropouts are placed here so
+    they always land on payload bits, not on unused audio."""
+    with wave.open(str(cover), "rb") as wf:
+        sampwidth, n_channels, n_frames = wf.getsampwidth(), wf.getnchannels(), wf.getnframes()
+    n_samples = n_frames * n_channels
+    cover_id = location.cover_id_for_audio(sampwidth, n_channels, n_frames)
+    start = location.derive_start(cover_id, passphrase, n_samples)
+    needed = payload_len * 8 * chip_length
+    if needed > n_samples - start:
+        start = 0
+    return start + needed // 2
 
 
 def main():
@@ -266,7 +327,39 @@ def main():
     frame_altered.unlink()
     print(f"wrote {limitation_path} (frames visibly altered, audio untouched - verifies AUTHENTIC: the stated cover-hash-is-audio-only limitation, made concrete)")
 
-    print("\nDone. See samples/README.md for passphrases and expected verdicts.")
+    # --- DSSS robustness demo (innovation): steps 1, 3, 4 and 6 of the ---
+    # --- DSSS + Reed-Solomon demo script. Base file first, then attacks. ---
+    # All noise is seeded and every dropout is placed at the middle of the
+    # payload region, so these files are bit-identical on every run.
+
+    # Step 1: LSB is fragile - inaudible noise destroys the payload.
+    lsb_noisy = SAMPLES_DIR / "stego_audio_authentic_noise5.wav"
+    add_gaussian_noise(stego_wav, lsb_noisy, sigma=5, seed=1)
+    print(f"wrote {lsb_noisy} (LSB stego + noise sigma=5, inaudible)")
+
+    # Base DSSS stego that steps 3, 4 and 6 attack (step 2 embeds this live).
+    dsss_wav = SAMPLES_DIR / "stego_audio_dsss_authentic.wav"
+    dsss_len = audio_stego.encode_dsss(cover_wav, dsss_wav, fields, PASSPHRASE, demo_a, chip_length=DSSS_CHIP)
+    print(f"wrote {dsss_wav} (DSSS, chip length {DSSS_CHIP}, {dsss_len} payload bytes)")
+
+    # Step 3: DSSS survives heavy noise - each bit is voted on by DSSS_CHIP samples.
+    dsss_noisy = SAMPLES_DIR / "stego_audio_dsss_noise500.wav"
+    add_gaussian_noise(dsss_wav, dsss_noisy, sigma=500, seed=3)
+    print(f"wrote {dsss_noisy} (DSSS stego + noise sigma=500)")
+
+    # Steps 4 and 6: burst errors. Measured at chip 32 on this cover:
+    # 20 ms corrupts 4 consecutive payload bytes; Reed-Solomon (16 parity
+    # symbols per 255-byte block in core/payload.py, so up to 8 byte repairs)
+    # fixes them -> AUTHENTIC. 80 ms corrupts 14 -> beyond RS -> TAMPERED.
+    # Placement matters: RS covers only salt + IV + ciphertext, not the
+    # prefix, signature-length field or signature. The payload midpoint
+    # (~byte 330 of 660) is inside the RS-protected region; a dropout over
+    # the signature bytes would NOT be repaired.
+    mid = dsss_payload_midpoint(cover_wav, PASSPHRASE, dsss_len, DSSS_CHIP)
+    for ms, step in ((20, 4), (80, 6)):
+        path = SAMPLES_DIR / f"stego_audio_dsss_dropout{ms}ms.wav"
+        add_dropout(dsss_wav, path, mid, ms)
+        print(f"wrote {path} (step {step}: {ms} ms silenced at sample {mid})")
 
 
 if __name__ == "__main__":

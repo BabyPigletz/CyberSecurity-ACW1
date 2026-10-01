@@ -58,6 +58,7 @@ class BodyResult:
     claimed_signer_key_id: Optional[str]
     cover_hash_hex: Optional[str]
     parsed: Optional[dict]
+    rs_corrected: int = 0 
 
 
 @dataclass
@@ -65,6 +66,7 @@ class Extracted:
     payload: dict
     embedded_cover_hash: Optional[str]
     recomputed_cover_hash: str
+    rs_corrected: int = 0 
 
     @property
     def cover_hash_matches(self) -> bool:
@@ -77,11 +79,22 @@ def apply_ecc(data: bytes, nsym: int = ECC_SYMBOLS) -> bytes:
 
 
 def remove_ecc(data: bytes, nsym: int = ECC_SYMBOLS) -> bytes:
+    return remove_ecc_counted(data, nsym)[0]
+
+
+def remove_ecc_counted(data: bytes, nsym: int = ECC_SYMBOLS) -> "tuple[bytes, int]":
+    """Like remove_ecc, but also returns how many bytes Reed-Solomon repaired.
+
+    reedsolo's decode() returns (message, message+ecc, errata_positions); the
+    length of the last item is the number of corrupted bytes it fixed, summed
+    across every 255-byte RS block.
+    """
     rsc = RSCodec(nsym)
     try:
-        return bytes(rsc.decode(data)[0])
+        message, _, errata = rsc.decode(data)
     except ReedSolomonError as e:
         raise ValueError("Payload unrecoverable due to corruption.") from e
+    return bytes(message), len(errata)
 
 
 def _utc_now() -> str:
@@ -166,7 +179,7 @@ def parse_body(
     signature = raw[2:2 + sig_len]
 
     try:
-        signed_data = remove_ecc(raw[2 + sig_len:])
+        signed_data, rs_corrected = remove_ecc_counted(raw[2 + sig_len:])
         salt = signed_data[0:SALT_LEN]
         iv = signed_data[SALT_LEN:SALT_LEN + IV_LEN]
         ciphertext = signed_data[SALT_LEN + IV_LEN:]
@@ -190,7 +203,7 @@ def parse_body(
     except (ValueError, UnicodeDecodeError):
         return BodyResult(verified_key_id, True, None, None, None)
 
-    return BodyResult(verified_key_id, True, obj.get("signer_key_id"), obj.get("cover_hash"), obj)
+    return BodyResult(verified_key_id, True, obj.get("signer_key_id"), obj.get("cover_hash"), obj, rs_corrected)
 
 
 def parse_body_from_bytes(raw: bytes, passphrase: str, trusted_keys: dict) -> "tuple[Verdict, Optional[Extracted]]":
@@ -221,7 +234,7 @@ def parse_body_from_bytes(raw: bytes, passphrase: str, trusted_keys: dict) -> "t
     signature = body[2:2 + sig_len]
 
     try:
-        signed_data = remove_ecc(body[2 + sig_len:])
+        signed_data, rs_corrected = remove_ecc_counted(body[2 + sig_len:])
         salt = signed_data[0:SALT_LEN]
         iv = signed_data[SALT_LEN:SALT_LEN + IV_LEN]
         ciphertext = signed_data[SALT_LEN + IV_LEN:]
@@ -252,7 +265,7 @@ def parse_body_from_bytes(raw: bytes, passphrase: str, trusted_keys: dict) -> "t
         return Verdict.SIGNATURE_INVALID, None
 
     cover_hash_hex = obj.get("cover_hash")
-    extracted = Extracted(obj, cover_hash_hex, cover_hash_hex or "")
+    extracted = Extracted(obj, cover_hash_hex, cover_hash_hex or "", rs_corrected)
     return Verdict.AUTHENTIC, extracted
 
 
@@ -342,4 +355,4 @@ def verify(carrier, cover_id: str, passphrase: str, trusted_keys: dict) -> "tupl
     verdict = decide(ev)
     if recomputed is None or verdict not in (Verdict.AUTHENTIC, Verdict.TAMPERED):
         return verdict, None
-    return verdict, Extracted(body_result.parsed, body_result.cover_hash_hex, recomputed)
+    return verdict, Extracted(body_result.parsed, body_result.cover_hash_hex, recomputed, body_result.rs_corrected)

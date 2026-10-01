@@ -499,11 +499,20 @@ class ACW1(tk.Tk):
             pass  # preview is best-effort; the verdict below is what matters
         self.stego_path = path
 
-        self.verdict_var.set(verdict.name)
+        self.verdict_var.set(self._verdict_text(verdict, extracted))
         self.verdict_label.config(fg=VERDICT_COLORS.get(verdict, "black"))
         self._set_text(self.message_output, self._describe_message(verdict, extracted))
         self._set_text(self.payload_text, self._describe_extraction(verdict, extracted))
         self.status_var.set(f"Verified {path.name}: {verdict.name}")
+
+    @staticmethod
+    def _verdict_text(verdict: Verdict, extracted) -> str:
+        """Verdict name, plus how many bytes Reed-Solomon repaired when it had to."""
+        repaired = getattr(extracted, "rs_corrected", 0) if extracted is not None else 0
+        if repaired:
+            noun = "byte" if repaired == 1 else "bytes"
+            return f"{verdict.name} (RS repaired {repaired} {noun})"
+        return verdict.name
 
     @staticmethod
     def _describe_message(verdict: Verdict, extracted) -> str:
